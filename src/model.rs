@@ -47,17 +47,27 @@ pub async fn run(
                     message: error.to_string(),
                 }
             })?;
-            let built = configure(client.agent(agent.model_id()), &system, &root, agent.meta.max_turns);
+            let built = configure(
+                client.agent(agent.model_id()),
+                &system,
+                &root,
+                agent.meta.max_turns,
+            );
             drive(built, first_turn).await
         }
         "anthropic" => {
-            let client =
-                rig::providers::anthropic::Client::from_env().map_err(|error| RunError::Provider {
+            let client = rig::providers::anthropic::Client::from_env().map_err(|error| {
+                RunError::Provider {
                     provider: "anthropic".to_owned(),
                     message: error.to_string(),
-                })?;
-            let built =
-                configure(client.agent(agent.model_id()), &system, &root, agent.meta.max_turns);
+                }
+            })?;
+            let built = configure(
+                client.agent(agent.model_id()),
+                &system,
+                &root,
+                agent.meta.max_turns,
+            );
             drive(built, first_turn).await
         }
         other => Err(RunError::UnknownProvider(other.to_owned())),
@@ -139,7 +149,11 @@ impl Tool for ReadFile {
         })
     }
 
-    async fn call(&self, _: &mut ToolContext, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         self.0.read_file(&args.path, DEFAULT_MAX_BYTES)
     }
 }
@@ -165,7 +179,11 @@ impl Tool for Grep {
         })
     }
 
-    async fn call(&self, _: &mut ToolContext, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(self.0.grep(&args.pattern, &args.glob)?.join("\n"))
     }
 }
@@ -189,7 +207,11 @@ impl Tool for ListFiles {
         })
     }
 
-    async fn call(&self, _: &mut ToolContext, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(self.0.list(&args.glob)?.join("\n"))
     }
 }

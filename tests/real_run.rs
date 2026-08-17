@@ -27,6 +27,13 @@ fn an_agent_reads_a_file_and_reports_it() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("PLUM-42"), "the model did not read the file: {stdout}");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("PLUM-42"),
+        "the model did not read the file: {stdout}"
+    );
 }
