@@ -39,7 +39,7 @@ The situation comes from the caller and the profile at run time.
 | --- | --- |
 | `name` | The agent name. It must match the directory the file lives in. |
 | `model` | `<provider>/<model>`. `claude-code/<model>` or `anthropic/<model>`. |
-| `skill` | An almanac skill (recorded; the body is pasted into the system prompt for now). |
+| `skill` | An almanac skill name. Recorded and shown; its body is not yet applied to the prompt. |
 | `profile` | A gaff profile that carries the agent's context, guards, and stop rule. |
 | `max_turns` | The most model turns a run may take. Default 4. |
 | `timeout` | The per-model-call deadline. Default `120s`. |

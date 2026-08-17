@@ -22,7 +22,8 @@ You review the provided diff for defects. Report defects only.
 ```
 
 The body is the system prompt: identity only. The gaff profile named by
-`profile` carries the agent's context, its guards, and its stop rule.
+`profile` carries the agent's context, its guards, and its stop rule. The
+`skill` name is recorded and shown; its body is not yet applied.
 
 ## Stores
 

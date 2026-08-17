@@ -5,7 +5,6 @@ doc: |
 transitions:
   - name: "the command surface reads, validates, and composes"
     command: |
-      export PATH="$(cd .. && pwd)/.missouri/bin:$PATH"
       root=kersh-root
 
       # list names the agent with its description.

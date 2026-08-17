@@ -26,6 +26,8 @@ pub enum RunError {
     Provider { provider: String, message: String },
     #[error("the agent's root is not usable: {0}")]
     Root(#[from] ToolError),
+    #[error("the run did not finish within {0:?}")]
+    TimedOut(std::time::Duration),
     #[error("the run failed: {0}")]
     Prompt(String),
 }
@@ -39,38 +41,52 @@ pub async fn run(
     first_turn: String,
 ) -> Result<String, RunError> {
     let root = Arc::new(root);
-    match agent.provider() {
-        "claude-code" => {
-            let client = rig_claude_code::ClaudeCodeClient::from_env().map_err(|error| {
-                RunError::Provider {
-                    provider: "claude-code".to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
-            let built = configure(
-                client.agent(agent.model_id()),
-                &system,
-                &root,
-                agent.meta.max_turns,
-            );
-            drive(built, first_turn).await
+    let per_call = agent.meta.timeout.0;
+    // The whole run is bounded by the per-call deadline times the turn cap,
+    // plus one call of margin. rig caps the turn count, not the wall clock,
+    // so a hung provider would otherwise block forever.
+    let turns = u32::try_from(agent.meta.max_turns).unwrap_or(u32::MAX);
+    let whole_run = per_call.saturating_mul(turns.saturating_add(1));
+
+    let work = async {
+        match agent.provider() {
+            "claude-code" => {
+                let client = rig_claude_code::ClaudeCodeClient::from_env()
+                    .map_err(|error| RunError::Provider {
+                        provider: "claude-code".to_owned(),
+                        message: error.to_string(),
+                    })?
+                    .with_timeout(per_call);
+                let built = configure(
+                    client.agent(agent.model_id()),
+                    &system,
+                    &root,
+                    agent.meta.max_turns,
+                );
+                drive(built, first_turn).await
+            }
+            "anthropic" => {
+                let client = rig::providers::anthropic::Client::from_env().map_err(|error| {
+                    RunError::Provider {
+                        provider: "anthropic".to_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let built = configure(
+                    client.agent(agent.model_id()),
+                    &system,
+                    &root,
+                    agent.meta.max_turns,
+                );
+                drive(built, first_turn).await
+            }
+            other => Err(RunError::UnknownProvider(other.to_owned())),
         }
-        "anthropic" => {
-            let client = rig::providers::anthropic::Client::from_env().map_err(|error| {
-                RunError::Provider {
-                    provider: "anthropic".to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
-            let built = configure(
-                client.agent(agent.model_id()),
-                &system,
-                &root,
-                agent.meta.max_turns,
-            );
-            drive(built, first_turn).await
-        }
-        other => Err(RunError::UnknownProvider(other.to_owned())),
+    };
+
+    match tokio::time::timeout(whole_run, work).await {
+        Ok(result) => result,
+        Err(_) => Err(RunError::TimedOut(whole_run)),
     }
 }
 
@@ -213,5 +229,36 @@ impl Tool for ListFiles {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         Ok(self.0.list(&args.glob)?.join("\n"))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn agent(model: &str) -> Agent {
+        Agent::parse(
+            &format!("---\nname: a\nmodel: {model}\n---\nbody"),
+            Path::new("x"),
+            "a",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unknown_provider_is_named_not_panicked() {
+        // `model_is_safe` allows a slashed value with any lowercase halves,
+        // so an unknown provider reaches the run loop and is named.
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root::new(dir.path()).unwrap();
+        let error = run(&agent("frobnicator/x"), root, "sys".into(), "hi".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, RunError::UnknownProvider(p) if p == "frobnicator"),
+            "{error:?}"
+        );
     }
 }

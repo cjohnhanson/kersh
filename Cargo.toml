@@ -30,7 +30,7 @@ globset = "0.4"
 getrandom = "0.3"
 rig-core = { version = "0.41", default-features = false }
 rig = "0.41"
-rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", version = "0.1.0" }
+rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "9ebacb6ecd7fe55fb98c9f00790b2a6be950086a", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"

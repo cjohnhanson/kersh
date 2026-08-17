@@ -54,6 +54,9 @@ impl Stores {
 
     /// The path to an agent file, searching the stores in order.
     fn agent_path(&self, name: &str) -> Option<PathBuf> {
+        if !is_single_component(name) {
+            return None;
+        }
         self.dirs
             .iter()
             .map(|dir| dir.join(AGENTS_DIR).join(name).join("AGENT.md"))
@@ -93,6 +96,13 @@ impl Stores {
         names.sort();
         names
     }
+}
+
+/// Whether `name` is a single normal path component, so it cannot
+/// traverse. A `/`, a `\`, `.`, `..`, or an empty name is refused, so a
+/// name never reaches outside a store's `agents` directory.
+fn is_single_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 /// Walk up from `start` to the nearest directory holding `kersh.yml`.
@@ -136,6 +146,19 @@ mod tests {
         let agent = stores.load("reviewer").unwrap();
         assert_eq!(agent.meta.name, "reviewer");
         assert_eq!(stores.names(), vec!["reviewer".to_string()]);
+    }
+
+    #[test]
+    fn a_name_that_would_traverse_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(ROOT_MARKER), "").unwrap();
+        let stores = Stores::discover(tmp.path(), None);
+        for name in ["../secret", "..", ".", "a/b", "x\\y"] {
+            assert!(
+                matches!(stores.load(name), Err(LoadError::NotFound(_))),
+                "{name}"
+            );
+        }
     }
 
     #[test]

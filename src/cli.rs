@@ -241,15 +241,21 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-/// The first positional argument (not a flag or a flag value).
+/// The first positional argument (not a flag or a flag value). Everything
+/// after a `--` separator is positional, so a value may start with a dash.
 fn positional(args: &[String]) -> Option<String> {
     let mut skip_next = false;
+    let mut end_of_flags = false;
     for arg in args {
         if skip_next {
             skip_next = false;
             continue;
         }
-        if arg.starts_with('-') {
+        if !end_of_flags && arg == "--" {
+            end_of_flags = true;
+            continue;
+        }
+        if !end_of_flags && arg.starts_with('-') {
             skip_next = takes_value(arg);
             continue;
         }
@@ -259,16 +265,22 @@ fn positional(args: &[String]) -> Option<String> {
 }
 
 /// The first positional after the one equal to `first`, so `render <name>
-/// <prompt>` finds the prompt.
+/// <prompt>` finds the prompt. A `--` separator makes the rest positional,
+/// so a prompt may start with a dash: `render x -- -fix it`.
 fn positional_after(args: &[String], first: &str) -> Option<String> {
     let mut seen_first = false;
     let mut skip_next = false;
+    let mut end_of_flags = false;
     for arg in args {
         if skip_next {
             skip_next = false;
             continue;
         }
-        if arg.starts_with('-') {
+        if !end_of_flags && arg == "--" {
+            end_of_flags = true;
+            continue;
+        }
+        if !end_of_flags && arg.starts_with('-') {
             skip_next = takes_value(arg);
             continue;
         }
@@ -311,10 +323,24 @@ mod tests {
     }
 
     #[test]
-    fn list_names_the_agents() {
+    fn list_succeeds_and_the_store_resolves_the_agent() {
         let tmp = root_with_agent();
-        let code = list(&args(&["--root", tmp.path().to_str().unwrap()]));
-        assert_eq!(code, ExitCode::SUCCESS);
+        let root = tmp.path().to_str().unwrap();
+        assert_eq!(list(&args(&["--root", root])), ExitCode::SUCCESS);
+        // The logic list depends on: the store names and loads the agent.
+        let stores = Stores::from_root(PathBuf::from(root));
+        assert_eq!(stores.names(), vec!["reviewer".to_string()]);
+        assert!(stores.load("reviewer").is_ok());
+    }
+
+    #[test]
+    fn a_double_dash_lets_a_prompt_start_with_a_dash() {
+        let a = args(&["reviewer", "--root", "/r", "--", "-fix the tests"]);
+        assert_eq!(positional(&a).as_deref(), Some("reviewer"));
+        assert_eq!(
+            positional_after(&a, "reviewer").as_deref(),
+            Some("-fix the tests")
+        );
     }
 
     #[test]

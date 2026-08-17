@@ -99,7 +99,14 @@ impl Root {
         let mut names = Vec::new();
         let mut walker = ignore::WalkBuilder::new(&self.canonical);
         walker.standard_filters(false).follow_links(false);
-        for entry in walker.build().take(MAX_FILES).flatten() {
+        let mut visited = 0usize;
+        let mut truncated = false;
+        for entry in walker.build().flatten() {
+            visited += 1;
+            if visited > MAX_FILES {
+                truncated = true;
+                break;
+            }
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
@@ -110,6 +117,11 @@ impl Root {
             }
         }
         names.sort();
+        if truncated {
+            names.push(format!(
+                "[kersh: stopped after {MAX_FILES} files; narrow the glob for a complete list]"
+            ));
+        }
         Ok(names)
     }
 
@@ -131,7 +143,14 @@ impl Root {
         let mut hits = Vec::new();
         let mut walker = ignore::WalkBuilder::new(&self.canonical);
         walker.standard_filters(false).follow_links(false);
-        for entry in walker.build().take(MAX_FILES).flatten() {
+        let mut visited = 0usize;
+        let mut truncated = false;
+        for entry in walker.build().flatten() {
+            visited += 1;
+            if visited > MAX_FILES {
+                truncated = true;
+                break;
+            }
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
@@ -150,6 +169,11 @@ impl Root {
                     Ok(true)
                 }),
             );
+        }
+        if truncated {
+            hits.push(format!(
+                "[kersh: stopped after {MAX_FILES} files; narrow the glob for a complete search]"
+            ));
         }
         Ok(hits)
     }

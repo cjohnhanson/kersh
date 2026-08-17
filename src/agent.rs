@@ -182,7 +182,11 @@ fn model_is_safe(model: &str) -> bool {
         return false;
     };
     let ok = |s: &str| {
+        // A leading dash makes the whole value read as an option, even
+        // though `-` is otherwise allowed. It is a valid inner character,
+        // never the first one.
         !s.is_empty()
+            && !s.starts_with('-')
             && s.bytes().all(|b| {
                 b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
             })
@@ -227,6 +231,11 @@ mod tests {
             "noprovider",
             "claude-code/",
             "/haiku",
+            // A leading dash in either half reads as an option.
+            "claude-code/--dangerously-skip-permissions",
+            "claude-code/-x",
+            "-p/haiku",
+            "anthropic/--append-system-prompt",
         ] {
             let text = format!("---\nname: r\nmodel: \"{model}\"\n---\nbody\n");
             let error = parse(&text, "r").unwrap_err();

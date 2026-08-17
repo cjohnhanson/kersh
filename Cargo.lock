@@ -5287,7 +5287,7 @@ dependencies = [
 [[package]]
 name = "rig-claude-code"
 version = "0.1.0"
-source = "git+https://github.com/cjohnhanson/rig-claude-code#9ebacb6ecd7fe55fb98c9f00790b2a6be950086a"
+source = "git+https://github.com/cjohnhanson/rig-claude-code?rev=9ebacb6ecd7fe55fb98c9f00790b2a6be950086a#9ebacb6ecd7fe55fb98c9f00790b2a6be950086a"
 dependencies = [
  "async-stream",
  "bytes",
