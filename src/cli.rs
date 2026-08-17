@@ -25,7 +25,7 @@ const DOCS: &str = include_str!("../docs/kersh.md");
 #[must_use]
 pub fn run(args: &[String]) -> ExitCode {
     let Some((command, rest)) = args.split_first() else {
-        eprintln!("usage: kersh <list|show|check|render|docs|prime> [args]");
+        eprintln!("usage: kersh <list|show|check|render|run|docs|prime> [args]");
         return ExitCode::FAILURE;
     };
     let command = command.as_str();
@@ -34,6 +34,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "show" => show(rest),
         "check" => check(rest),
         "render" => render(rest),
+        "run" => run_agent(rest),
         "docs" => {
             print!("{DOCS}");
             ExitCode::SUCCESS
@@ -43,7 +44,7 @@ pub fn run(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         "-h" | "--help" | "help" => {
-            println!("usage: kersh <list|show|check|render|docs|prime> [args]");
+            println!("usage: kersh <list|show|check|render|run|docs|prime> [args]");
             ExitCode::SUCCESS
         }
         other => fail(&format!("unknown command `{other}`")),
@@ -149,6 +150,68 @@ fn render(rest: &[String]) -> ExitCode {
     println!("=== system prompt ===\n{}\n", composed.system);
     println!("=== first user turn ===\n{}", composed.first_turn);
     ExitCode::SUCCESS
+}
+
+/// `kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]`.
+///
+/// The agent runs through rig against the provider its `model` names.
+/// The final text goes to standard output. The tools are confined to the
+/// current directory, or `--root`.
+fn run_agent(rest: &[String]) -> ExitCode {
+    let Some(name) = positional(rest) else {
+        return fail("usage: kersh run <name> [--context-file <path>] [prompt]");
+    };
+    let stores = stores(rest);
+    let agent = match stores.load(&name) {
+        Ok(agent) => agent,
+        Err(error) => return fail(&error.to_string()),
+    };
+    let context = match flag_value(rest, "--context-file") {
+        Some(path) => match read_context(&path) {
+            Ok(text) => Some(text),
+            Err(error) => return fail(&error),
+        },
+        None => None,
+    };
+    let prompt = positional_after(rest, &name).unwrap_or_default();
+    if prompt.trim().is_empty() && context.is_none() {
+        return fail("give a prompt, or context with --context-file");
+    }
+
+    let root_dir = flag_value(rest, "--root")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root = match crate::tools::Root::new(&root_dir) {
+        Ok(root) => root,
+        Err(error) => return fail(&error.to_string()),
+    };
+
+    let composed = crate::compose::compose(
+        &agent,
+        None,
+        context.as_deref(),
+        &prompt,
+        &crate::util::nonce(),
+    );
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => return fail(&format!("cannot start the async runtime: {error}")),
+    };
+    let outcome = runtime.block_on(crate::model::run(
+        &agent,
+        root,
+        composed.system,
+        composed.first_turn,
+    ));
+    match outcome {
+        Ok(answer) => {
+            println!("{answer}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(&error.to_string()),
+    }
 }
 
 /// Read `--context-file`, where `-` means standard input.

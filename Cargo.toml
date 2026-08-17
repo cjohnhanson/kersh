@@ -28,6 +28,9 @@ grep-searcher = "0.1"
 grep-regex = "0.1"
 globset = "0.4"
 getrandom = "0.3"
+rig-core = { version = "0.41", default-features = false }
+rig = "0.41"
+rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"
