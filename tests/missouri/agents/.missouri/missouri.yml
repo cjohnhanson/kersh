@@ -1,0 +1,61 @@
+doc: |
+  The command surface over a kersh root: list, show, check, render, and
+  the model-string guard. A model that could be read as a CLI option is
+  refused, and a name that does not match its directory fails check.
+transitions:
+  - name: "the command surface reads, validates, and composes"
+    command: |
+      export PATH="$(cd .. && pwd)/.missouri/bin:$PATH"
+      root=kersh-root
+
+      # list names the agent with its description.
+      LIST=$(kersh list --root "$root")
+      case "$LIST" in
+        *reviewer*Reviews*) ;;
+        *) echo "FAIL: list must name the agent: $LIST"; exit 1 ;;
+      esac
+
+      # show prints the model and the body.
+      SHOW=$(kersh show reviewer --root "$root")
+      case "$SHOW" in
+        *"claude-code/haiku"*"review diffs"*) ;;
+        *) echo "FAIL: show must print the model and body: $SHOW"; exit 1 ;;
+      esac
+
+      # check passes on the good root.
+      kersh check --root "$root" >/dev/null || { echo "FAIL: check must pass"; exit 1; }
+
+      # render composes without a turn, wrapping the context.
+      RENDER=$(printf -- '- a diff line\n' | kersh render reviewer --root "$root" --context-file - "review it")
+      case "$RENDER" in
+        *"system prompt"*"review diffs"*"first user turn"*"a diff line"*"review it"*) ;;
+        *) echo "FAIL: render must compose system and first turn: $RENDER"; exit 1 ;;
+      esac
+      case "$RENDER" in
+        *"<context-"*) ;;
+        *) echo "FAIL: render must wrap the context: $RENDER"; exit 1 ;;
+      esac
+
+      # A model that could be read as a CLI option is refused by check.
+      mkdir -p "$root/agents/hostile"
+      printf -- '---\nname: hostile\nmodel: "haiku --settings=x"\n---\nb\n' > "$root/agents/hostile/AGENT.md"
+      if kersh check --root "$root" 2>/dev/null; then
+        echo "FAIL: check must refuse a model that reads as an option"; exit 1
+      fi
+      rm -rf "$root/agents/hostile"
+
+      # A name that does not match its directory fails check.
+      mkdir -p "$root/agents/mismatch"
+      printf -- '---\nname: other\nmodel: claude-code/haiku\n---\nb\n' > "$root/agents/mismatch/AGENT.md"
+      if kersh check --root "$root" 2>/dev/null; then
+        echo "FAIL: check must refuse a name that does not match its directory"; exit 1
+      fi
+      rm -rf "$root/agents/mismatch"
+
+      # docs and prime print.
+      kersh docs | grep -q "agent file" || { echo "FAIL: docs must print"; exit 1; }
+      kersh prime | grep -q "kersh" || { echo "FAIL: prime must print"; exit 1; }
+
+      echo SURFACE_OK
+    target: ../agents-checked
+    stdout: "SURFACE_OK\n"
