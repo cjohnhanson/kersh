@@ -23,9 +23,12 @@ jobs:
         run: cargo test --locked
       - name: 'install missouri'
         uses: 'cjohnhanson/missouri@main'
+      - name: 'install kersh on PATH'
+        run: |
+          cargo install --path . --locked --root "$HOME/.kersh-tools" kersh
+          echo "$HOME/.kersh-tools/bin" >> "$GITHUB_PATH"
       - name: 'missouri'
         run: |
           if [ -d tests/missouri ]; then
-            cargo build --locked
             cd tests/missouri && MISSOURI_SANDBOX=preinstalled missouri run
           fi
