@@ -1,0 +1,2 @@
+doc: |
+  a gaff failure at a tool call fails closed; the call never ran

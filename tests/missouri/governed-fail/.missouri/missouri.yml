@@ -1,0 +1,50 @@
+doc: |
+  A gaff failure at a tool call fails closed. A fake gaff allows the
+  session start but exits 1 on the read_file pre-tool call, so gaff could
+  not answer. kersh treats an unanswerable check as a refusal: the call
+  never runs, the secret never reaches the model, and no post-call
+  `tool_call` event is recorded. This is the fail-closed twin of the
+  refuse suite, and it guards the safety-critical path where a broken gaff
+  must not open the gate.
+transitions:
+  - name: "a gaff failure at a tool call fails closed"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # session_start answers, but the read_file pre-tool call exits 1: a
+      # failure, not a refusal (exit 2) and not an allow (exit 0).
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      echo "\$body" >> "$T/events"
+      case "\$body" in
+        *'"gaff_event":"session_start"'*) exit 0 ;;
+        *'"gaff_event":"pre_tool_call"'*'"tool_name":"read_file"'*)
+          echo "gaff crashed" 1>&2; exit 1 ;;
+      esac
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      script='[{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review the notes" 2>&1)
+      code=$?
+
+      [ "$code" = 0 ] || { echo "FAIL: a fail-closed skip is not a run failure: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *TOPSECRET-42*) echo "FAIL: a gaff failure must not open the gate: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      case "$OUT" in
+        *"could not check"*) ;;
+        *) echo "FAIL: the model must see the fail-closed reason: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      if grep -q '"gaff_event":"tool_call"' "$T/events"; then
+        echo "FAIL: a call gaff could not check must not count as a tool_call"; rm -rf "$T"; exit 1
+      fi
+
+      rm -rf "$T"
+      echo FAIL_CLOSED_OK
+    target: ../governed-fail-checked
+    stdout: "FAIL_CLOSED_OK\n"

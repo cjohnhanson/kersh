@@ -30,6 +30,8 @@ transitions:
         *TOPSECRET-42*) ;;
         *) echo "FAIL: the file content must reach the model: $OUT"; rm -rf "$T"; exit 1 ;;
       esac
+      grep -q '"gaff_event":"pre_tool_call"' "$T/events" \
+        || { echo "FAIL: the allow path must consult gaff before the call"; rm -rf "$T"; exit 1; }
       grep -q '"gaff_event":"tool_call"' "$T/events" \
         || { echo "FAIL: an allowed call must record a post-call tool_call event"; rm -rf "$T"; exit 1; }
 
