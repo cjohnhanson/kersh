@@ -20,10 +20,8 @@ fn fake_gaff(dir: &std::path::Path, rec: &std::path::Path, mode: &str) -> std::p
         rec = rec.display(),
         mode = mode,
     );
-    // Sync and close the script before chmod and exec. A plain write that
-    // is exec'd at once can flake on CI: the spawn fails to find or read
-    // the not-yet-durable file, gaff records nothing, and a later read of
-    // the recording panics. sync_all makes the content durable first.
+    // Sync and close the script before chmod and exec, so its content is
+    // durable when the shell reads it.
     let path = dir.join("gaff");
     {
         let mut file = std::fs::File::create(&path).unwrap();
@@ -42,6 +40,31 @@ fn gaff_with(binary: &std::path::Path) -> Gaff {
     }
 }
 
+/// Run one hook and return its outcome, once the fake gaff has recorded
+/// its input. A freshly written fake binary occasionally fails to exec on
+/// a loaded CI runner: the spawn returns an error, gaff records nothing,
+/// and a later read of the recording panics. Clearing the recording and
+/// retrying makes the seam test deterministic, and the cleared file means
+/// a stale record from a prior call is never mistaken for this one.
+async fn recorded_hook(
+    gaff: &Gaff,
+    rec: &std::path::Path,
+    event: &str,
+    tool: Option<(&str, &str)>,
+) -> Outcome {
+    let stdin = rec.join("stdin");
+    for _ in 0..10 {
+        let _ = std::fs::remove_file(&stdin);
+        let outcome = gaff.hook(event, tool).await;
+        if stdin.exists() {
+            return outcome;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // A final attempt; a genuine failure now surfaces in the caller's read.
+    gaff.hook(event, tool).await
+}
+
 #[tokio::test]
 async fn session_start_allows_and_parses_the_context() {
     let dir = tempfile::tempdir().unwrap();
@@ -52,7 +75,8 @@ async fn session_start_allows_and_parses_the_context() {
         &rec,
         r#"printf '{"event":"session_start","context":"HOUSE RULES"}'; exit 0"#,
     );
-    let outcome = gaff_with(&bin).hook("session_start", None).await;
+    let gaff = gaff_with(&bin);
+    let outcome = recorded_hook(&gaff, &rec, "session_start", None).await;
     assert_eq!(outcome, Outcome::Allow("HOUSE RULES".to_owned()));
 
     // The payload and the environment carried gaff's own vocabulary.
@@ -76,12 +100,14 @@ async fn a_pre_tool_call_carries_the_tool_and_its_input() {
     let rec = dir.path().join("rec");
     std::fs::create_dir(&rec).unwrap();
     let bin = fake_gaff(dir.path(), &rec, "exit 0");
-    let _ = gaff_with(&bin)
-        .hook(
-            "pre_tool_call",
-            Some(("read_file", r#"{"path":"/x/.env"}"#)),
-        )
-        .await;
+    let gaff = gaff_with(&bin);
+    let _ = recorded_hook(
+        &gaff,
+        &rec,
+        "pre_tool_call",
+        Some(("read_file", r#"{"path":"/x/.env"}"#)),
+    )
+    .await;
     let payload = std::fs::read_to_string(rec.join("stdin")).unwrap();
     // The event name is the enforcement contract: gaff runs a guard only
     // for the event it recognizes. Pin it so a rename fails a test, not
@@ -106,7 +132,7 @@ async fn each_enforcement_event_carries_its_exact_name() {
         ("stop", None),
         ("pre_tool_call", Some(("list", "{}"))),
     ] {
-        let _ = gaff.hook(event, tool).await;
+        let _ = recorded_hook(&gaff, &rec, event, tool).await;
         let payload = std::fs::read_to_string(rec.join("stdin")).unwrap();
         assert!(
             payload.contains(&format!("\"gaff_event\":\"{event}\"")),
@@ -125,9 +151,8 @@ async fn exit_two_is_a_refusal_with_the_reason() {
         &rec,
         "echo 'that path holds secrets' 1>&2; exit 2",
     );
-    let outcome = gaff_with(&bin)
-        .hook("pre_tool_call", Some(("read_file", "{}")))
-        .await;
+    let gaff = gaff_with(&bin);
+    let outcome = recorded_hook(&gaff, &rec, "pre_tool_call", Some(("read_file", "{}"))).await;
     match outcome {
         Outcome::Refuse(reason) => assert!(reason.contains("secrets"), "{reason}"),
         other => panic!("{other:?}"),
