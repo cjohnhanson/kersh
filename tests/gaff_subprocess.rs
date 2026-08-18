@@ -19,8 +19,17 @@ fn fake_gaff(dir: &std::path::Path, rec: &std::path::Path, mode: &str) -> std::p
         rec = rec.display(),
         mode = mode,
     );
+    // Sync and close the script before chmod and exec. A plain write that
+    // is exec'd at once can flake on CI: the spawn fails to find or read
+    // the not-yet-durable file, gaff records nothing, and a later read of
+    // the recording panics. sync_all makes the content durable first.
+    use std::io::Write as _;
     let path = dir.join("gaff");
-    std::fs::write(&path, script).unwrap();
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(script.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     path
 }
