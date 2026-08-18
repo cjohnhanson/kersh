@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 
 use kersh::gaff::{Gaff, Outcome};
@@ -23,7 +24,6 @@ fn fake_gaff(dir: &std::path::Path, rec: &std::path::Path, mode: &str) -> std::p
     // is exec'd at once can flake on CI: the spawn fails to find or read
     // the not-yet-durable file, gaff records nothing, and a later read of
     // the recording panics. sync_all makes the content durable first.
-    use std::io::Write as _;
     let path = dir.join("gaff");
     {
         let mut file = std::fs::File::create(&path).unwrap();
