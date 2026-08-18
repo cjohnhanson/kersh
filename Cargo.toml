@@ -1,6 +1,6 @@
 [package]
 name = "kersh"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A declarative agent runner: a markdown file names a model, a skill, and a profile."
@@ -15,6 +15,11 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
+
+[features]
+# A scripted fake model provider, for hermetic end-to-end tests. Off by
+# default, so the shipped binary carries no fake provider.
+fake-model = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

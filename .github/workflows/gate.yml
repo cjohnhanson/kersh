@@ -18,17 +18,38 @@ jobs:
       - name: 'format'
         run: cargo fmt --all --check
       - name: 'clippy'
-        run: cargo clippy --all-targets -- -D warnings
-      - name: 'test'
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: 'test (default features)'
         run: cargo test --locked
+      - name: 'test (fake-model feature)'
+        run: cargo test --locked --features fake-model
       - name: 'install missouri'
         uses: 'cjohnhanson/missouri@main'
       - name: 'install kersh on PATH'
         run: |
-          cargo install --path . --locked --root "$HOME/.kersh-tools" kersh
+          cargo install --path . --locked --features fake-model --root "$HOME/.kersh-tools" kersh
           echo "$HOME/.kersh-tools/bin" >> "$GITHUB_PATH"
       - name: 'missouri'
         run: |
           if [ -d tests/missouri ]; then
-            cd tests/missouri && MISSOURI_SANDBOX=preinstalled missouri run
+            cd tests/missouri
+            MISSOURI_SANDBOX=preinstalled missouri run | tee /tmp/missouri.out
+            # A discovery or path error could exit 0 having run none of the
+            # governed suites. Assert every governed transition reported its
+            # own pass line, so a silent skip fails the gate. Strip color
+            # first, because missouri colors the PASS token.
+            sed 's/\x1b\[[0-9;]*m//g' /tmp/missouri.out > /tmp/missouri.plain
+            for suite in governed-allow governed-refuse governed-streak \
+                         governed-hold governed-context governed-fail; do
+              grep -q "PASS $suite " /tmp/missouri.plain \
+                || { echo "MISSING: $suite did not pass"; exit 1; }
+            done
           fi
+      - name: 'seam against real gaff'
+        run: |
+          # Not hermetic on purpose: the fake-gaff suites prove kersh's hook
+          # logic, and this proves kersh's emitted vocabulary matches the
+          # real gaff's generic host. A merged gaff (hrt5 + 720x) is built
+          # from source so a cross-repo drift breaks the gate.
+          cargo install --git https://github.com/cjohnhanson/gaff --locked --root "$HOME/.gaff-tools" gaff
+          tests/seam_real_gaff.sh "$HOME/.gaff-tools/bin/gaff" "$HOME/.kersh-tools/bin/kersh"

@@ -93,12 +93,34 @@ model. The model string is validated before it could reach a child
 process's argument vector, because a value such as `haiku --settings=...`
 would otherwise execute a hook before any turn.
 
+## Governance with gaff
+
+An agent that declares a `profile` runs under [gaff](https://github.com/cjohnhanson/gaff).
+kersh calls `gaff hook` as a subprocess at each tool call and at each
+stop, so the profile's guards and stop rule apply, and it prepends the
+profile's session-start context to the first turn.
+
+- The profile is selected with `GAFF_PROFILE`, which gaff honors from the
+  environment only when `transitions.agent_may_set` names the profile. An
+  operator opts a bundle into kersh use by listing it there.
+- A gaff guard names a tool and a field. kersh sends its own tool names,
+  so a guard for a kersh agent names `read_file`, `grep`, or `list`. A
+  base guard written against another host's tool names, such as Claude
+  Code's `Read`, does not apply to a kersh agent.
+- Governance is opt-in and fail-safe. Without a `profile`, kersh runs
+  ungoverned. With one, kersh probes gaff at session start, and a broken
+  or absent gaff aborts the run rather than degrading to ungoverned.
+- gaff injects context only at session start in this release; a bundle
+  cannot inject context mid-run.
+
+`KERSH_GAFF` names the gaff binary; the default is `gaff` on `PATH`.
+
 ## Status
 
-This is v0.1.0: agent files, the read tools, prompt composition, both
-providers, and the command surface. gaff governance (a profile's guards,
-context, and stop rule enforced at run time) is the next milestone; it
-waits on a gaff change that lets a second host receive gaff's output.
+This is v0.2: agent files, the read tools, prompt composition, both
+providers, the command surface, and gaff governance. The almanac skill
+body is recorded but not yet applied. The tools are read-only; a write
+tool and a command runner are not in this release.
 
 ## License
 

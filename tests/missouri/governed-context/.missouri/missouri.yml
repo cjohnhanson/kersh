@@ -1,0 +1,38 @@
+doc: |
+  The session-start context reaches the model. A fake gaff injects a house
+  rule at session start. kersh prepends it to the first turn, wrapped in
+  the untrusted-context marker. The fake model echoes the prompt it
+  received, so the injected rule appears in the output. This proves the
+  context path end to end without a network call.
+transitions:
+  - name: "the injected session-start context reaches the model"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      case "\$body" in
+        *'"gaff_event":"session_start"'*)
+          printf '{"event":"session_start","context":"HOUSE RULE DEPLOY-777"}'; exit 0 ;;
+      esac
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      script='[{"kind":"echo_prompt"}]'
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review the notes" 2>&1)
+      code=$?
+
+      [ "$code" = 0 ] || { echo "FAIL: the run must exit 0: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *"HOUSE RULE DEPLOY-777"*) ;;
+        *) echo "FAIL: the injected context must reach the model: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+
+      rm -rf "$T"
+      echo CONTEXT_OK
+    target: ../governed-context-checked
+    stdout: "CONTEXT_OK\n"

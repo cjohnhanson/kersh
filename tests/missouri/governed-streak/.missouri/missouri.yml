@@ -1,0 +1,40 @@
+doc: |
+  A model that keeps retrying one refused call is stopped. A fake gaff
+  refuses the same read_file call every time, and the fake model calls it
+  on every turn. After three refusals in a row, kersh stops the run rather
+  than burning the turn budget. The turn cap is ten, so the streak cap of
+  three ends it first.
+transitions:
+  - name: "three refusals of one call stop the run"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      case "\$body" in
+        *'"gaff_event":"pre_tool_call"'*'"tool_name":"read_file"'*)
+          echo "read_file is refused" 1>&2; exit 2 ;;
+      esac
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      # The same refused call on every one of many turns.
+      call='{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}}'
+      script="[$call,$call,$call,$call,$call,$call]"
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review" 2>&1)
+      code=$?
+
+      [ "$code" != 0 ] || { echo "FAIL: the streak stop must not exit 0: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *"refused 3 times in a row"*) ;;
+        *) echo "FAIL: the stop must name the streak: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+
+      rm -rf "$T"
+      echo STREAK_OK
+    target: ../governed-streak-checked
+    stdout: "STREAK_OK\n"

@@ -48,3 +48,14 @@ The `model` field is `<provider>/<model>`. `claude-code/<model>` runs the
 local `claude` CLI so a turn draws on a Claude subscription.
 `anthropic/<model>` uses an API key. The value is validated before it
 reaches a child process, because a model string is a command argument.
+
+## Governance
+
+An agent that declares a `profile` runs under gaff. kersh calls `gaff
+hook` at each tool call and each stop, so the profile's guards and stop
+rule apply, and it prepends the profile's session-start context to the
+first turn. Governance is opt-in: without a `profile`, kersh runs
+ungoverned. With one, a broken or absent gaff aborts the run rather than
+degrading. `KERSH_GAFF` names the gaff binary; the default is `gaff` on
+`PATH`. A gaff guard for a kersh agent names kersh's own tools
+(`read_file`, `grep`, `list`).

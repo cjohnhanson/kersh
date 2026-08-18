@@ -1,0 +1,48 @@
+doc: |
+  A refused tool call never runs, and its target never reaches the model.
+  A fake gaff refuses the read_file pre-tool call with exit 2. kersh skips
+  the call, feeds the refusal reason back to the model, and suppresses the
+  post-call `tool_call` count. The fake model echoes the tool result, so
+  the output holds the refusal reason, never the secret. This is the core
+  governance proof, and it is hermetic.
+transitions:
+  - name: "a refused read never runs and the secret never leaks"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # A fake gaff that refuses the read_file pre-tool call.
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      echo "\$body" >> "$T/events"
+      case "\$body" in
+        *'"gaff_event":"pre_tool_call"'*'"tool_name":"read_file"'*)
+          echo "read_file is refused: that path holds secrets" 1>&2; exit 2 ;;
+      esac
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      script='[{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review the notes" 2>&1)
+      code=$?
+
+      [ "$code" = 0 ] || { echo "FAIL: a skipped call is not a run failure: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *TOPSECRET-42*) echo "FAIL: the secret leaked past the guard: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      case "$OUT" in
+        *"is refused"*) ;;
+        *) echo "FAIL: the model must see the refusal reason: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      # A skipped call must not record a post-call tool_call event.
+      if grep -q '"gaff_event":"tool_call"' "$T/events"; then
+        echo "FAIL: a skipped call must not count as a tool_call"; rm -rf "$T"; exit 1
+      fi
+
+      rm -rf "$T"
+      echo REFUSE_OK
+    target: ../governed-refuse-checked
+    stdout: "REFUSE_OK\n"

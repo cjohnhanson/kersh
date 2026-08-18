@@ -14,6 +14,10 @@
 pub mod agent;
 pub mod cli;
 pub mod compose;
+#[cfg(feature = "fake-model")]
+pub mod fake_model;
+pub mod gaff;
+pub mod hook;
 pub mod model;
 pub mod store;
 pub mod tools;

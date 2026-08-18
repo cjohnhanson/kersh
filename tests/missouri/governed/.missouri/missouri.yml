@@ -1,0 +1,37 @@
+doc: |
+  A profiled agent runs under gaff. If gaff cannot answer the session
+  start, kersh aborts before any model call, so a broken or absent gaff
+  never degrades into an ungoverned or dead run.
+transitions:
+  - name: "a profiled agent aborts when gaff cannot start"
+    command: |
+      root=kersh-root
+
+      # gaff absent: KERSH_GAFF points at nothing.
+      OUT=$(KERSH_GAFF=/nonexistent/gaff kersh run reviewer --root "$root" "review" 2>&1)
+      code=$?
+      [ "$code" != "0" ] || { echo "FAIL: a missing gaff must abort: $OUT"; exit 1; }
+      case "$OUT" in
+        *"gaff could not start"*) ;;
+        *) echo "FAIL: the abort must say gaff could not start: $OUT"; exit 1 ;;
+      esac
+
+      # gaff present but failing session_start (exit 1).
+      cat > fakegaff <<'SH'
+      #!/bin/sh
+      cat > /dev/null
+      exit 1
+      SH
+      chmod +x fakegaff
+      OUT=$(KERSH_GAFF="$PWD/fakegaff" kersh run reviewer --root "$root" "review" 2>&1)
+      code=$?
+      [ "$code" != "0" ] || { echo "FAIL: a failing gaff must abort: $OUT"; exit 1; }
+      case "$OUT" in
+        *"gaff could not start"*) ;;
+        *) echo "FAIL: a failing gaff must abort with the reason: $OUT"; exit 1 ;;
+      esac
+      rm -f fakegaff
+
+      echo GOVERNED_OK
+    target: ../governed-checked
+    stdout: "GOVERNED_OK\n"

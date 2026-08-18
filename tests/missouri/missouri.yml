@@ -1,6 +1,6 @@
 setup:
   - name: "build kersh"
-    command: "cargo build --quiet --manifest-path ../../Cargo.toml"
+    command: "cargo build --quiet --features fake-model --manifest-path ../../Cargo.toml"
   - name: "link binary"
     command: "mkdir -p .missouri/bin && ln -sf $(cd ../.. && pwd)/target/debug/kersh .missouri/bin/kersh"
 packages:

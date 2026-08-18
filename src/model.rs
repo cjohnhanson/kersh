@@ -28,25 +28,37 @@ pub enum RunError {
     Root(#[from] ToolError),
     #[error("the run did not finish within {0:?}")]
     TimedOut(std::time::Duration),
+    #[error("gaff governance is on for this agent, but gaff could not start: {0}")]
+    Gaff(String),
     #[error("the run failed: {0}")]
     Prompt(String),
 }
 
 /// Run `agent` with `system` as its preamble and `first_turn` as its
 /// prompt, its tools confined to `root`.
+///
+/// When `gaff` is set, the run is governed: a rig hook calls `gaff hook`
+/// at each tool call and at each stop, so the profile's guards and stop
+/// rule apply. The caller has already run the session-start probe.
 pub async fn run(
     agent: &Agent,
     root: Root,
     system: String,
     first_turn: String,
+    gaff: Option<crate::gaff::Gaff>,
 ) -> Result<String, RunError> {
     let root = Arc::new(root);
     let per_call = agent.meta.timeout.0;
     // The whole run is bounded by the per-call deadline times the turn cap,
-    // plus one call of margin. rig caps the turn count, not the wall clock,
-    // so a hung provider would otherwise block forever.
+    // plus a margin that also covers the gaff calls each turn adds. rig
+    // caps the turn count, not the wall clock, so a hung provider would
+    // otherwise block forever.
     let turns = u32::try_from(agent.meta.max_turns).unwrap_or(u32::MAX);
-    let whole_run = per_call.saturating_mul(turns.saturating_add(1));
+    let gaff_margin =
+        crate::gaff::HOOK_TIMEOUT.saturating_mul(turns.saturating_mul(3).saturating_add(1));
+    let whole_run = per_call
+        .saturating_mul(turns.saturating_add(1))
+        .saturating_add(gaff_margin);
 
     let work = async {
         match agent.provider() {
@@ -62,6 +74,7 @@ pub async fn run(
                     &system,
                     &root,
                     agent.meta.max_turns,
+                    gaff,
                 );
                 drive(built, first_turn).await
             }
@@ -77,6 +90,24 @@ pub async fn run(
                     &system,
                     &root,
                     agent.meta.max_turns,
+                    gaff,
+                );
+                drive(built, first_turn).await
+            }
+            #[cfg(feature = "fake-model")]
+            "fake" => {
+                let model = crate::fake_model::FakeModel::from_env().map_err(|message| {
+                    RunError::Provider {
+                        provider: "fake".to_owned(),
+                        message,
+                    }
+                })?;
+                let built = configure(
+                    AgentBuilder::new(model),
+                    &system,
+                    &root,
+                    agent.meta.max_turns,
+                    gaff,
                 );
                 drive(built, first_turn).await
             }
@@ -90,21 +121,26 @@ pub async fn run(
     }
 }
 
-/// Add the read tools, the preamble, and the turn cap to any provider's
-/// agent builder, then build it.
+/// Add the read tools, the preamble, the turn cap, and the gaff hook to
+/// any provider's agent builder, then build it.
 fn configure<M: CompletionModel + 'static>(
     builder: AgentBuilder<M>,
     system: &str,
     root: &Arc<Root>,
     max_turns: usize,
+    gaff: Option<crate::gaff::Gaff>,
 ) -> rig::agent::Agent<M> {
-    builder
+    let builder = builder
         .preamble(system)
         .tool(ReadFile(Arc::clone(root)))
         .tool(Grep(Arc::clone(root)))
         .tool(ListFiles(Arc::clone(root)))
-        .default_max_turns(max_turns)
-        .build()
+        .default_max_turns(max_turns);
+    let builder = match gaff {
+        Some(gaff) => builder.add_hook(crate::hook::GaffHook::new(gaff)),
+        None => builder,
+    };
+    builder.build()
 }
 
 /// Prompt the agent and return its final text.
@@ -253,11 +289,41 @@ mod tests {
         // so an unknown provider reaches the run loop and is named.
         let dir = tempfile::tempdir().unwrap();
         let root = Root::new(dir.path()).unwrap();
-        let error = run(&agent("frobnicator/x"), root, "sys".into(), "hi".into())
-            .await
-            .unwrap_err();
+        let error = run(
+            &agent("frobnicator/x"),
+            root,
+            "sys".into(),
+            "hi".into(),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&error, RunError::UnknownProvider(p) if p == "frobnicator"),
+            "{error:?}"
+        );
+    }
+
+    // Without the `fake-model` feature, the shipped binary has no fake
+    // provider: `fake/scripted` is just an unknown provider. The feature
+    // build carries the provider, and the governed missouri suites drive
+    // it end to end.
+    #[cfg(not(feature = "fake-model"))]
+    #[tokio::test]
+    async fn the_fake_provider_is_absent_without_its_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root::new(dir.path()).unwrap();
+        let error = run(
+            &agent("fake/scripted"),
+            root,
+            "sys".into(),
+            "hi".into(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, RunError::UnknownProvider(p) if p == "fake"),
             "{error:?}"
         );
     }
