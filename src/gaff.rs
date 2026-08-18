@@ -29,6 +29,16 @@ use serde::Deserialize;
 /// second, so this bounds a wedged gaff, not real work.
 pub const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The normalized event names gaff's generic host recognizes. A name that
+/// gaff does not recognize is a no-op there, so a guard on it would not
+/// fire. These strings are the enforcement contract; gaff's own `generic`
+/// tests pin the same names on its side. Verified against gaff: a
+/// `pre_tool_call` on a guarded tool exits 2.
+pub const SESSION_START: &str = "session_start";
+pub const PRE_TOOL_CALL: &str = "pre_tool_call";
+pub const TOOL_CALL: &str = "tool_call";
+pub const STOP: &str = "stop";
+
 /// The run-scoped gaff context: the minted session id and the profile.
 #[derive(Debug, Clone)]
 pub struct Gaff {

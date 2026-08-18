@@ -124,7 +124,10 @@ impl AgentHook for GaffHook {
         let key = format!("{}\u{1f}{}", event.tool_name, event.args);
         let outcome = self
             .gaff
-            .hook("pre_tool_call", Some((event.tool_name, event.args)))
+            .hook(
+                crate::gaff::PRE_TOOL_CALL,
+                Some((event.tool_name, event.args)),
+            )
             .await;
         let refused = !matches!(outcome, Outcome::Allow(_));
         let action = tool_action(outcome);
@@ -160,7 +163,7 @@ impl AgentHook for GaffHook {
             .scratchpad()
             .update::<SkippedCalls, _>(|s| s.0.remove(event.internal_call_id));
         if !skipped {
-            let _ = self.gaff.hook("tool_call", None).await;
+            let _ = self.gaff.hook(crate::gaff::TOOL_CALL, None).await;
         }
         ToolResultAction::Keep
     }
@@ -173,7 +176,7 @@ impl AgentHook for GaffHook {
         if !is_tool_free(event.content) {
             return ModelTurnAction::Continue;
         }
-        let outcome = self.gaff.hook("stop", None).await;
+        let outcome = self.gaff.hook(crate::gaff::STOP, None).await;
         ctx.scratchpad()
             .update::<StopRetries, _>(|retries| stop_action(true, outcome.clone(), &mut retries.0))
     }

@@ -198,7 +198,7 @@ fn run_agent(rest: &[String]) -> ExitCode {
     // leaving every tool call to fail closed into a dead run.
     let gaff = crate::gaff::for_agent(&agent);
     let gaff_context = match &gaff {
-        Some(gaff) => match runtime.block_on(gaff.hook("session_start", None)) {
+        Some(gaff) => match runtime.block_on(gaff.hook(crate::gaff::SESSION_START, None)) {
             crate::gaff::Outcome::Allow(context) => Some(context),
             crate::gaff::Outcome::Refuse(reason) => {
                 return fail(&format!("gaff refused the session start: {reason}"));

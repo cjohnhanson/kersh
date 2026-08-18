@@ -74,8 +74,36 @@ async fn a_pre_tool_call_carries_the_tool_and_its_input() {
         )
         .await;
     let payload = std::fs::read_to_string(rec.join("stdin")).unwrap();
+    // The event name is the enforcement contract: gaff runs a guard only
+    // for the event it recognizes. Pin it so a rename fails a test, not
+    // silently a guard.
+    assert!(
+        payload.contains("\"gaff_event\":\"pre_tool_call\""),
+        "{payload}"
+    );
     assert!(payload.contains("\"tool_name\":\"read_file\""), "{payload}");
     assert!(payload.contains("\"path\":\"/x/.env\""), "{payload}");
+}
+
+#[tokio::test]
+async fn each_enforcement_event_carries_its_exact_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("rec");
+    std::fs::create_dir(&rec).unwrap();
+    let bin = fake_gaff(dir.path(), &rec, "exit 0");
+    let gaff = gaff_with(&bin);
+    for (event, tool) in [
+        ("tool_call", None),
+        ("stop", None),
+        ("pre_tool_call", Some(("list", "{}"))),
+    ] {
+        let _ = gaff.hook(event, tool).await;
+        let payload = std::fs::read_to_string(rec.join("stdin")).unwrap();
+        assert!(
+            payload.contains(&format!("\"gaff_event\":\"{event}\"")),
+            "{event}: {payload}"
+        );
+    }
 }
 
 #[tokio::test]
