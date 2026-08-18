@@ -19,6 +19,7 @@ pub mod fake_model;
 pub mod gaff;
 pub mod hook;
 pub mod model;
+pub mod skill;
 pub mod store;
 pub mod tools;
 pub mod util;

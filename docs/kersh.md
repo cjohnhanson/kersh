@@ -23,7 +23,8 @@ You review the provided diff for defects. Report defects only.
 
 The body is the system prompt: identity only. The gaff profile named by
 `profile` carries the agent's context, its guards, and its stop rule. The
-`skill` name is recorded and shown; its body is not yet applied.
+`skill` names an almanac skill; kersh appends its body to the system
+prompt as the agent's method, and aborts if it cannot resolve.
 
 ## Stores
 

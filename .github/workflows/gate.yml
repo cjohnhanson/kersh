@@ -40,7 +40,8 @@ jobs:
             # first, because missouri colors the PASS token.
             sed 's/\x1b\[[0-9;]*m//g' /tmp/missouri.out > /tmp/missouri.plain
             for suite in governed-allow governed-refuse governed-streak \
-                         governed-hold governed-context governed-fail; do
+                         governed-hold governed-context governed-fail \
+                         skill-applied skill-missing; do
               grep -q "PASS $suite " /tmp/missouri.plain \
                 || { echo "MISSING: $suite did not pass"; exit 1; }
             done

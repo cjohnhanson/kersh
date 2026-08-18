@@ -1,0 +1,34 @@
+doc: |
+  A named skill that almanac cannot resolve aborts the run. An agent that
+  names a skill is defined to use it, so kersh fails closed rather than
+  running the agent without its method.
+transitions:
+  - name: "an unresolvable skill aborts, it does not run without the method"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # A fake almanac that knows no skill.
+      cat > "$T/almanac" <<'SH'
+      #!/bin/sh
+      echo "almanac: skill '$2' not found" 1>&2; exit 1
+      SH
+      chmod +x "$T/almanac"
+
+      OUT=$(KERSH_ALMANAC="$T/almanac" kersh render reviewer --root "$root" "review" 2>&1)
+      code=$?
+      [ "$code" != 0 ] || { echo "FAIL: a missing skill must abort: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *"could not resolve the skill"*) ;;
+        *) echo "FAIL: the abort must name the unresolved skill: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+
+      # An absent almanac binary aborts the same way.
+      OUT=$(KERSH_ALMANAC=/nonexistent/almanac kersh render reviewer --root "$root" "review" 2>&1)
+      code=$?
+      [ "$code" != 0 ] || { echo "FAIL: an absent almanac must abort: $OUT"; rm -rf "$T"; exit 1; }
+
+      rm -rf "$T"
+      echo SKILL_ABSENT_OK
+    target: ../skill-missing-checked
+    stdout: "SKILL_ABSENT_OK\n"

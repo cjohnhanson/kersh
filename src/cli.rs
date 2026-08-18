@@ -140,9 +140,13 @@ fn render(rest: &[String]) -> ExitCode {
         None => None,
     };
     let prompt = positional_after(rest, &name).unwrap_or_default();
+    let skill = match skill_body(&agent) {
+        Ok(skill) => skill,
+        Err(error) => return fail(&error),
+    };
     let composed = crate::compose::compose(
         &agent,
-        None,
+        skill.as_deref(),
         context.as_deref(),
         &prompt,
         &crate::util::nonce(),
@@ -212,12 +216,20 @@ fn run_agent(rest: &[String]) -> ExitCode {
         None => None,
     };
 
+    // The agent's almanac skill is its method, resolved before the run. A
+    // named skill that cannot resolve aborts, so a run never silently drops
+    // the agent's method.
+    let skill = match skill_body(&agent) {
+        Ok(skill) => skill,
+        Err(error) => return fail(&error),
+    };
+
     // gaff's session-start context and any --context-file are both
     // untrusted; the compose step wraps them together, gaff first.
     let combined = combine_context(gaff_context, context);
     let composed = crate::compose::compose(
         &agent,
-        None,
+        skill.as_deref(),
         combined.as_deref(),
         &prompt,
         &crate::util::nonce(),
@@ -236,6 +248,17 @@ fn run_agent(rest: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error.to_string()),
+    }
+}
+
+/// Resolve the agent's almanac skill body, if it names one. An agent
+/// without a `skill` resolves to `None`; a named skill that almanac
+/// cannot resolve is an error, so the run aborts rather than dropping the
+/// method.
+fn skill_body(agent: &crate::agent::Agent) -> Result<Option<String>, String> {
+    match &agent.meta.skill {
+        None => Ok(None),
+        Some(name) => crate::skill::resolve(name).map(Some),
     }
 }
 
