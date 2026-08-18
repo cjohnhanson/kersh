@@ -1,0 +1,44 @@
+doc: |
+  A held stop keeps the agent working, then releases. A fake gaff refuses
+  the first two stop events and allows the third. kersh feeds each refusal
+  back to the model, which produces another turn, and the run ends cleanly
+  when the hold clears. The counter lives outside the state tree, so the
+  transition leaves no trace.
+transitions:
+  - name: "a stop hold retries then releases"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # Refuse the first two stop events, allow the third. The counter is
+      # a file, because each hook call is a fresh process.
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      case "\$body" in
+        *'"gaff_event":"stop"'*)
+          n=\$(cat "$T/n" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "$T/n"
+          if [ "\$n" -le 2 ]; then echo "finish the review before you stop" 1>&2; exit 2; fi
+          exit 0 ;;
+      esac
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      script='[{"kind":"text","text":"draft one"},{"kind":"text","text":"draft two"},{"kind":"text","text":"final review"},{"kind":"text","text":"spare"}]'
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review" 2>&1)
+      code=$?
+
+      [ "$code" = 0 ] || { echo "FAIL: a released hold must exit 0: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *"final review"*) ;;
+        *) echo "FAIL: the run must end on the turn after the hold cleared: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      seen=$(cat "$T/n" 2>/dev/null)
+      [ "$seen" = 3 ] || { echo "FAIL: the hold must refuse twice then allow, saw $seen stops"; rm -rf "$T"; exit 1; }
+
+      rm -rf "$T"
+      echo HOLD_OK
+    target: ../governed-hold-checked
+    stdout: "HOLD_OK\n"

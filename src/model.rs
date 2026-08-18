@@ -94,6 +94,23 @@ pub async fn run(
                 );
                 drive(built, first_turn).await
             }
+            #[cfg(feature = "fake-model")]
+            "fake" => {
+                let model = crate::fake_model::FakeModel::from_env().map_err(|message| {
+                    RunError::Provider {
+                        provider: "fake".to_owned(),
+                        message,
+                    }
+                })?;
+                let built = configure(
+                    AgentBuilder::new(model),
+                    &system,
+                    &root,
+                    agent.meta.max_turns,
+                    gaff,
+                );
+                drive(built, first_turn).await
+            }
             other => Err(RunError::UnknownProvider(other.to_owned())),
         }
     };
@@ -283,6 +300,30 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(&error, RunError::UnknownProvider(p) if p == "frobnicator"),
+            "{error:?}"
+        );
+    }
+
+    // Without the `fake-model` feature, the shipped binary has no fake
+    // provider: `fake/scripted` is just an unknown provider. The feature
+    // build carries the provider, and the governed missouri suites drive
+    // it end to end.
+    #[cfg(not(feature = "fake-model"))]
+    #[tokio::test]
+    async fn the_fake_provider_is_absent_without_its_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root::new(dir.path()).unwrap();
+        let error = run(
+            &agent("fake/scripted"),
+            root,
+            "sys".into(),
+            "hi".into(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, RunError::UnknownProvider(p) if p == "fake"),
             "{error:?}"
         );
     }

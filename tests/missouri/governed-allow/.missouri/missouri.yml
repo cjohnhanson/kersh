@@ -1,0 +1,39 @@
+doc: |
+  An allowed tool call runs. A fake gaff allows every event, so the
+  read_file call runs and its content reaches the model. The fake model
+  echoes the tool result, so the file content appears in the output, and
+  gaff records a post-call `tool_call` event because the call was not
+  skipped. No network and no real model: the whole governed loop is
+  hermetic.
+transitions:
+  - name: "an allowed read runs and its content reaches the model"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # A fake gaff that allows every event and records what it saw.
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      body=\$(cat)
+      echo "\$body" >> "$T/events"
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      script='[{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+        kersh run reviewer --root "$root" "review the notes" 2>&1)
+      code=$?
+
+      [ "$code" = 0 ] || { echo "FAIL: an allowed run must exit 0: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *TOPSECRET-42*) ;;
+        *) echo "FAIL: the file content must reach the model: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      grep -q '"gaff_event":"tool_call"' "$T/events" \
+        || { echo "FAIL: an allowed call must record a post-call tool_call event"; rm -rf "$T"; exit 1; }
+
+      rm -rf "$T"
+      echo ALLOW_OK
+    target: ../governed-allow-checked
+    stdout: "ALLOW_OK\n"
