@@ -1,0 +1,42 @@
+doc: |
+  An agent's almanac skill body is applied to the system prompt. kersh
+  runs `almanac show <name>`, strips the frontmatter, and appends the body
+  as the agent's method. `render` composes without a turn, so this proves
+  skill application with no model and no network.
+transitions:
+  - name: "the skill body is appended to the system prompt"
+    command: |
+      root=kersh-root
+      T=$(mktemp -d)
+
+      # A fake almanac whose `show code-review` prints a SKILL.md.
+      cat > "$T/almanac" <<'SH'
+      #!/bin/sh
+      if [ "$1" = show ] && [ "$2" = code-review ]; then
+        printf '%s\n' "---"
+        printf '%s\n' "name: code-review"
+        printf '%s\n' "description: Reviews code."
+        printf '%s\n' "---"
+        printf '%s\n' "Report defects only. Cite file and line."
+        exit 0
+      fi
+      echo "almanac: skill '$2' not found" 1>&2; exit 1
+      SH
+      chmod +x "$T/almanac"
+
+      OUT=$(KERSH_ALMANAC="$T/almanac" kersh render reviewer --root "$root" "review this" 2>&1)
+      code=$?
+      [ "$code" = 0 ] || { echo "FAIL: render must succeed: $OUT"; rm -rf "$T"; exit 1; }
+      case "$OUT" in
+        *"You review diffs."*"Report defects only. Cite file and line."*) ;;
+        *) echo "FAIL: the system prompt must be the body plus the skill: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+      # The frontmatter is stripped, not appended.
+      case "$OUT" in
+        *"description: Reviews code."*) echo "FAIL: the skill frontmatter must not reach the prompt: $OUT"; rm -rf "$T"; exit 1 ;;
+      esac
+
+      rm -rf "$T"
+      echo SKILL_OK
+    target: ../skill-applied-checked
+    stdout: "SKILL_OK\n"

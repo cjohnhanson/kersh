@@ -39,7 +39,7 @@ The situation comes from the caller and the profile at run time.
 | --- | --- |
 | `name` | The agent name. It must match the directory the file lives in. |
 | `model` | `<provider>/<model>`. `claude-code/<model>` or `anthropic/<model>`. |
-| `skill` | An almanac skill name. Recorded and shown; its body is not yet applied to the prompt. |
+| `skill` | An almanac skill name. Its body is appended to the system prompt as the agent's method. |
 | `profile` | A gaff profile that carries the agent's context, guards, and stop rule. |
 | `max_turns` | The most model turns a run may take. Default 4. |
 | `timeout` | The per-model-call deadline. Default `120s`. |
@@ -117,10 +117,10 @@ profile's session-start context to the first turn.
 
 ## Status
 
-This is v0.2: agent files, the read tools, prompt composition, both
-providers, the command surface, and gaff governance. The almanac skill
-body is recorded but not yet applied. The tools are read-only; a write
-tool and a command runner are not in this release.
+This is v0.3: agent files, the read tools, prompt composition, both
+providers, the command surface, gaff governance, and almanac skill
+application. The tools are read-only; a write tool and a command runner
+are not in this release.
 
 ## License
 
