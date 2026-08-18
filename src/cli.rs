@@ -187,23 +187,48 @@ fn run_agent(rest: &[String]) -> ExitCode {
         Err(error) => return fail(&error.to_string()),
     };
 
-    let composed = crate::compose::compose(
-        &agent,
-        None,
-        context.as_deref(),
-        &prompt,
-        &crate::util::nonce(),
-    );
-
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => return fail(&format!("cannot start the async runtime: {error}")),
     };
+
+    // Governance is opt-in: an agent with a `profile` runs under gaff. The
+    // session-start probe both fetches the injected context and proves
+    // gaff can answer, so a broken or absent gaff aborts here rather than
+    // leaving every tool call to fail closed into a dead run.
+    let gaff = crate::gaff::for_agent(&agent);
+    let gaff_context = match &gaff {
+        Some(gaff) => match runtime.block_on(gaff.hook("session_start", None)) {
+            crate::gaff::Outcome::Allow(context) => Some(context),
+            crate::gaff::Outcome::Refuse(reason) => {
+                return fail(&format!("gaff refused the session start: {reason}"));
+            }
+            crate::gaff::Outcome::Failed(message) => {
+                return fail(&format!(
+                    "gaff governance is on for `{name}`, but gaff could not start: {message}"
+                ));
+            }
+        },
+        None => None,
+    };
+
+    // gaff's session-start context and any --context-file are both
+    // untrusted; the compose step wraps them together, gaff first.
+    let combined = combine_context(gaff_context, context);
+    let composed = crate::compose::compose(
+        &agent,
+        None,
+        combined.as_deref(),
+        &prompt,
+        &crate::util::nonce(),
+    );
+
     let outcome = runtime.block_on(crate::model::run(
         &agent,
         root,
         composed.system,
         composed.first_turn,
+        gaff,
     ));
     match outcome {
         Ok(answer) => {
@@ -211,6 +236,17 @@ fn run_agent(rest: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error.to_string()),
+    }
+}
+
+/// Join gaff's session-start context and the caller's context, gaff
+/// first. Either may be absent.
+fn combine_context(gaff: Option<String>, file: Option<String>) -> Option<String> {
+    let gaff = gaff.filter(|s| !s.trim().is_empty());
+    match (gaff, file) {
+        (None, file) => file,
+        (Some(gaff), None) => Some(gaff),
+        (Some(gaff), Some(file)) => Some(format!("{gaff}\n\n{file}")),
     }
 }
 

@@ -14,6 +14,8 @@
 pub mod agent;
 pub mod cli;
 pub mod compose;
+pub mod gaff;
+pub mod hook;
 pub mod model;
 pub mod store;
 pub mod tools;
