@@ -12,10 +12,12 @@ Run a declarative agent. An agent is `agents/<name>/AGENT.md`: frontmatter
 names a model, a skill, and a gaff profile; the body is the system prompt.
 The profile carries the agent's context, guards, and stop rule.
 Commands:
+  kersh init [name]
   kersh list
   kersh show <name>
   kersh check
   kersh render <name> [--context-file <path>] [prompt]
+  kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]
   kersh docs
 ";
 
@@ -25,11 +27,12 @@ const DOCS: &str = include_str!("../docs/kersh.md");
 #[must_use]
 pub fn run(args: &[String]) -> ExitCode {
     let Some((command, rest)) = args.split_first() else {
-        eprintln!("usage: kersh <list|show|check|render|run|docs|prime> [args]");
+        eprintln!("usage: kersh <init|list|show|check|render|run|docs|prime> [args]");
         return ExitCode::FAILURE;
     };
     let command = command.as_str();
     match command {
+        "init" => init(rest),
         "list" => list(rest),
         "show" => show(rest),
         "check" => check(rest),
@@ -49,6 +52,83 @@ pub fn run(args: &[String]) -> ExitCode {
         }
         other => fail(&format!("unknown command `{other}`")),
     }
+}
+
+/// `kersh init [name]` — scaffold a kersh root in the current directory.
+///
+/// Write `kersh.yml` when it is absent, then `agents/<name>/AGENT.md` from
+/// a template when it is absent. Never overwrite a file, so a re-run is
+/// safe. `name` defaults to `reviewer`, and `--root` picks a directory
+/// other than the current one.
+fn init(rest: &[String]) -> ExitCode {
+    let name = positional(rest).unwrap_or_else(|| "reviewer".to_owned());
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        return fail(&format!(
+            "`{name}` is not a valid agent name; use a single directory name"
+        ));
+    }
+    let root = flag_value(rest, "--root")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut created = Vec::new();
+    let mut present = Vec::new();
+
+    let marker = root.join("kersh.yml");
+    if marker.exists() {
+        present.push("kersh.yml".to_owned());
+    } else if let Err(error) = std::fs::write(&marker, "") {
+        return fail(&format!("cannot write kersh.yml: {error}"));
+    } else {
+        created.push("kersh.yml".to_owned());
+    }
+
+    let agent_dir = root.join("agents").join(&name);
+    let agent_file = agent_dir.join("AGENT.md");
+    let rel = format!("agents/{name}/AGENT.md");
+    if agent_file.exists() {
+        present.push(rel);
+    } else if let Err(error) = std::fs::create_dir_all(&agent_dir) {
+        return fail(&format!("cannot create {}: {error}", agent_dir.display()));
+    } else if let Err(error) = std::fs::write(&agent_file, agent_template(&name)) {
+        return fail(&format!("cannot write {rel}: {error}"));
+    } else {
+        created.push(rel);
+    }
+
+    for path in &created {
+        println!("created {path}");
+    }
+    for path in &present {
+        println!("present {path}");
+    }
+    if created.is_empty() {
+        println!("nothing to do; the root and the agent are already here.");
+    } else {
+        println!("\nedit agents/{name}/AGENT.md, then run `kersh check`.");
+    }
+    ExitCode::SUCCESS
+}
+
+/// The starter agent file `init` writes. It is valid on its own, so
+/// `kersh check` passes right after `kersh init`.
+fn agent_template(name: &str) -> String {
+    format!(
+        "---\n\
+         name: {name}\n\
+         description: One line, shown by `kersh list`.\n\
+         model: claude-code/haiku\n\
+         max_turns: 4\n\
+         timeout: 120s\n\
+         ---\n\
+         State the agent's job here: what it does, what it reports, and\n\
+         what it must not do. This body is the system prompt.\n\
+         \n\
+         The caller supplies the situation with `--context-file` or a pipe.\n\
+         Use the read_file, grep, and list tools to read files under the\n\
+         working root.\n"
+    )
 }
 
 /// Resolve the stores from `--root` or by discovery.
@@ -390,6 +470,42 @@ mod tests {
         let stores = Stores::from_root(PathBuf::from(root));
         assert_eq!(stores.names(), vec!["reviewer".to_string()]);
         assert!(stores.load("reviewer").is_ok());
+    }
+
+    #[test]
+    fn init_scaffolds_a_root_and_a_valid_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        assert_eq!(init(&args(&["--root", root, "auditor"])), ExitCode::SUCCESS);
+        assert!(tmp.path().join("kersh.yml").exists());
+        // The template it writes parses, so `check` passes at once.
+        let stores = Stores::from_root(PathBuf::from(root));
+        assert_eq!(stores.names(), vec!["auditor".to_string()]);
+        assert!(stores.load("auditor").is_ok());
+    }
+
+    #[test]
+    fn init_never_overwrites_an_edited_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        init(&args(&["--root", root]));
+        let agent = tmp.path().join("agents").join("reviewer").join("AGENT.md");
+        std::fs::write(
+            &agent,
+            "---\nname: reviewer\nmodel: claude-code/haiku\n---\nmine\n",
+        )
+        .unwrap();
+        // A second init leaves the edited file alone.
+        assert_eq!(init(&args(&["--root", root])), ExitCode::SUCCESS);
+        assert!(std::fs::read_to_string(&agent).unwrap().contains("mine"));
+    }
+
+    #[test]
+    fn init_refuses_a_traversing_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        assert_eq!(init(&args(&["--root", root, "../evil"])), ExitCode::FAILURE);
+        assert!(!tmp.path().join("agents").join("..").exists());
     }
 
     #[test]

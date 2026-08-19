@@ -39,7 +39,7 @@ jobs:
             # own pass line, so a silent skip fails the gate. Strip color
             # first, because missouri colors the PASS token.
             sed 's/\x1b\[[0-9;]*m//g' /tmp/missouri.out > /tmp/missouri.plain
-            for suite in governed-allow governed-refuse governed-streak \
+            for suite in init governed-allow governed-refuse governed-streak \
                          governed-hold governed-context governed-fail \
                          skill-applied skill-missing; do
               grep -q "PASS $suite " /tmp/missouri.plain \
