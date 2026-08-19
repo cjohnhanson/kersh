@@ -1,0 +1,38 @@
+doc: |
+  `kersh init` scaffolds a kersh root. It writes `kersh.yml` and a
+  starter `agents/<name>/AGENT.md`, the template passes `kersh check`, a
+  re-run leaves an edited file alone, and a traversing name is refused. No
+  model and no network. The work happens in a temp dir, so the state tree
+  stays pristine.
+transitions:
+  - name: "init writes a valid root, is idempotent, and refuses a bad name"
+    command: |
+      T=$(mktemp -d)
+
+      # A fresh init writes the marker and a valid agent.
+      OUT=$(cd "$T" && kersh init 2>&1)
+      case "$OUT" in *"created kersh.yml"*) ;; *) echo "FAIL: init must create kersh.yml: $OUT"; rm -rf "$T"; exit 1 ;; esac
+      [ -f "$T/kersh.yml" ] || { echo "FAIL: kersh.yml is missing"; rm -rf "$T"; exit 1; }
+      [ -f "$T/agents/reviewer/AGENT.md" ] || { echo "FAIL: the agent file is missing"; rm -rf "$T"; exit 1; }
+
+      # The template it wrote passes check.
+      ( cd "$T" && kersh check ) | grep -q "^ok:" || { echo "FAIL: the scaffolded agent must pass check"; rm -rf "$T"; exit 1; }
+
+      # An edit survives a second init.
+      printf '%s\n' "MINE" >> "$T/agents/reviewer/AGENT.md"
+      ( cd "$T" && kersh init >/dev/null 2>&1 )
+      grep -q "MINE" "$T/agents/reviewer/AGENT.md" || { echo "FAIL: init overwrote an edited agent"; rm -rf "$T"; exit 1; }
+
+      # A named init adds a second agent.
+      ( cd "$T" && kersh init auditor >/dev/null 2>&1 )
+      [ -f "$T/agents/auditor/AGENT.md" ] || { echo "FAIL: a named init must add the agent"; rm -rf "$T"; exit 1; }
+
+      # A traversing name is refused, and writes nothing outside agents.
+      ( cd "$T" && kersh init ../evil >/dev/null 2>&1 )
+      [ "$?" != 0 ] || { echo "FAIL: a traversing name must be refused"; rm -rf "$T"; exit 1; }
+      [ ! -e "$T/evil" ] || { echo "FAIL: a traversing name escaped agents"; rm -rf "$T"; exit 1; }
+
+      rm -rf "$T"
+      echo INIT_OK
+    target: ../init-checked
+    stdout: "INIT_OK\n"

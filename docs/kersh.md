@@ -35,6 +35,9 @@ nearer root wins a name collision.
 
 ## Commands
 
+- `kersh init [name]` scaffolds a root in the current directory: a
+  `kersh.yml` and a starter `agents/<name>/AGENT.md`. It never overwrites
+  a file, and `name` defaults to `reviewer`.
 - `kersh list` names the agents.
 - `kersh show <name>` prints an agent's frontmatter and body.
 - `kersh check` validates every agent file.

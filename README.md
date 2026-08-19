@@ -54,6 +54,7 @@ root wins a name collision.
 ## Commands
 
 ```sh
+kersh init [name]          # scaffold a root and a starter agent here
 kersh list                 # name every agent
 kersh show <name>          # print an agent's frontmatter and body
 kersh check                # validate every agent file
@@ -117,10 +118,10 @@ profile's session-start context to the first turn.
 
 ## Status
 
-This is v0.3: agent files, the read tools, prompt composition, both
-providers, the command surface, gaff governance, and almanac skill
-application. The tools are read-only; a write tool and a command runner
-are not in this release.
+This is v0.4: agent files, the read tools, prompt composition, both
+providers, the command surface, `kersh init` scaffolding, gaff
+governance, and almanac skill application. The tools are read-only; a
+write tool and a command runner are not in this release.
 
 ## License
 
