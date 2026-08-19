@@ -1,6 +1,6 @@
 [package]
 name = "kersh"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A declarative agent runner: a markdown file names a model, a skill, and a profile."
@@ -35,7 +35,7 @@ globset = "0.4"
 getrandom = "0.3"
 rig-core = { version = "0.41", default-features = false }
 rig = "0.41"
-rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "9ebacb6ecd7fe55fb98c9f00790b2a6be950086a", version = "0.1.0" }
+rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "c0db1f69e630a2d2a27b276b8e41afdb77a1f938", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3"

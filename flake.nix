@@ -58,14 +58,14 @@
 
           kersh = rustPlatform.buildRustPackage {
             pname = "kersh";
-            version = "0.4.0";
+            version = "0.5.0";
             inherit src;
             cargoLock = {
               lockFile = ./Cargo.lock;
               # The one git dependency needs its checkout hash. crates.io
               # dependencies are vendored from the lock without one.
               outputHashes = {
-                "rig-claude-code-0.1.0" = "sha256-9yTfBivCa3uIfn31KiQ3+o1Yt8OxLcRDd6OsVgY//kw=";
+                "rig-claude-code-0.1.0" = "sha256-fCt4VI5grAPMoxFn1iSYpaWtpRUqtI2aaww+cI5Wtyo=";
               };
             };
             # The tests run in kersh's own CI. The nix build produces the
