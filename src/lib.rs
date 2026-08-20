@@ -6,8 +6,9 @@
 //! the agent through rig. The profile carries the agent's context, its
 //! guards, and its stop rule, so kersh declares none of that itself.
 //!
-//! The agent gets structured read tools, never a bash tool, because a
-//! shell command string cannot be guarded. See [`tools`].
+//! The agent gets one tool, a shell. The gaff profile decides what it may
+//! run, because gaff guards a tool call. kersh confines the command to the
+//! root and caps its output; the profile does the rest. See [`model`].
 
 #![forbid(unsafe_code)]
 

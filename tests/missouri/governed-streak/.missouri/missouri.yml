@@ -1,6 +1,6 @@
 doc: |
   A model that keeps retrying one refused call is stopped. A fake gaff
-  refuses the same read_file call every time, and the fake model calls it
+  refuses the same bash call every time, and the fake model calls it
   on every turn. After three refusals in a row, kersh stops the run rather
   than burning the turn budget. The turn cap is ten, so the streak cap of
   three ends it first.
@@ -14,15 +14,15 @@ transitions:
       #!/bin/sh
       body=\$(cat)
       case "\$body" in
-        *'"gaff_event":"pre_tool_call"'*'"tool_name":"read_file"'*)
-          echo "read_file is refused" 1>&2; exit 2 ;;
+        *'"gaff_event":"pre_tool_call"'*'"tool_name":"bash"'*)
+          echo "bash is refused" 1>&2; exit 2 ;;
       esac
       exit 0
       SH
       chmod +x "$T/gaff"
 
       # The same refused call on every one of many turns.
-      call='{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}}'
+      call='{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}}'
       script="[$call,$call,$call,$call,$call,$call]"
       OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review" 2>&1)

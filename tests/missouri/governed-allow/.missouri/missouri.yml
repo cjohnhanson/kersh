@@ -1,6 +1,6 @@
 doc: |
   An allowed tool call runs. A fake gaff allows every event, so the
-  read_file call runs and its content reaches the model. The fake model
+  bash call runs and its content reaches the model. The fake model
   echoes the tool result, so the file content appears in the output, and
   gaff records a post-call `tool_call` event because the call was not
   skipped. No network and no real model: the whole governed loop is
@@ -20,7 +20,7 @@ transitions:
       SH
       chmod +x "$T/gaff"
 
-      script='[{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+      script='[{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}},{"kind":"echo_tool_result"}]'
       OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review the notes" 2>&1)
       code=$?

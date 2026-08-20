@@ -22,7 +22,7 @@ use rig::streaming::StreamingCompletionResponse;
 use serde::{Deserialize, Serialize};
 
 /// One scripted model turn. Tagged by `kind`, so a fixture reads
-/// naturally: `{"kind":"tool","name":"read_file","args":{"path":"x"}}`,
+/// naturally: `{"kind":"tool","name":"bash","args":{"command":"cat x"}}`,
 /// `{"kind":"text","text":"done"}`, or `{"kind":"echo_prompt"}`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn the_turn_index_follows_the_assistant_count() {
         let fake = model(
-            r#"[{"kind":"tool","name":"read_file","args":{"path":"x"}},{"kind":"text","text":"done"}]"#,
+            r#"[{"kind":"tool","name":"bash","args":{"command":"cat x"}},{"kind":"text","text":"done"}]"#,
         );
         // Turn 0: no assistant messages yet, so the first entry, a tool.
         assert!(matches!(

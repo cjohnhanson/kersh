@@ -13,10 +13,10 @@
 //!
 //! # What does not apply
 //!
-//! A gaff base guard written against another host's tool names, such as
-//! Claude Code's `Read`, does not match kersh's `read_file` and does not
-//! protect a kersh agent. Only a profile guard written against kersh's
-//! own tool names applies. gaff injects context only at a flush point,
+//! kersh's tool is `bash`. A gaff base guard written against Claude Code's
+//! `Bash` and its `command` field guards a kersh agent the same way, since
+//! kersh sends the same shape. A guard written against a different tool
+//! name does not apply. gaff injects context only at a flush point,
 //! and kersh flushes only at session start, so a bundle cannot inject
 //! context mid-run in this release.
 

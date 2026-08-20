@@ -1,6 +1,6 @@
 doc: |
   A gaff failure at a tool call fails closed. A fake gaff allows the
-  session start but exits 1 on the read_file pre-tool call, so gaff could
+  session start but exits 1 on the bash pre-tool call, so gaff could
   not answer. kersh treats an unanswerable check as a refusal: the call
   never runs, the secret never reaches the model, and no post-call
   `tool_call` event is recorded. This is the fail-closed twin of the
@@ -12,7 +12,7 @@ transitions:
       root=kersh-root
       T=$(mktemp -d)
 
-      # session_start answers, but the read_file pre-tool call exits 1: a
+      # session_start answers, but the bash pre-tool call exits 1: a
       # failure, not a refusal (exit 2) and not an allow (exit 0).
       cat > "$T/gaff" <<SH
       #!/bin/sh
@@ -20,14 +20,14 @@ transitions:
       echo "\$body" >> "$T/events"
       case "\$body" in
         *'"gaff_event":"session_start"'*) exit 0 ;;
-        *'"gaff_event":"pre_tool_call"'*'"tool_name":"read_file"'*)
+        *'"gaff_event":"pre_tool_call"'*'"tool_name":"bash"'*)
           echo "gaff crashed" 1>&2; exit 1 ;;
       esac
       exit 0
       SH
       chmod +x "$T/gaff"
 
-      script='[{"kind":"tool","name":"read_file","args":{"path":"notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+      script='[{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}},{"kind":"echo_tool_result"}]'
       OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review the notes" 2>&1)
       code=$?

@@ -1,6 +1,7 @@
 //! Running an agent through rig.
 //!
-//! The three read tools become rig tools over the run's confined root.
+//! The agent gets one tool, a shell, confined to the run's root. The gaff
+//! profile decides what it may run.
 //! The provider is chosen from the model's prefix: `claude-code/<model>`
 //! runs the local `claude` CLI, and `anthropic/<model>` uses an API key.
 //! The agent's system prompt is its preamble, and the composed first turn
@@ -15,7 +16,7 @@ use rig::tool::{Tool, ToolContext};
 use serde::Deserialize;
 
 use crate::agent::Agent;
-use crate::tools::{DEFAULT_MAX_BYTES, Root, ToolError};
+use crate::tools::{Root, ToolError};
 
 /// Why a run could not start or finish.
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +63,7 @@ pub async fn run(
 
     // Claude Code attaches its working directory's files and every
     // CLAUDE.md up the tree once it has tools, which a large repo balloons
-    // past the token limit. The agent's read tools use the confined root,
+    // past the token limit. The agent's bash tool runs in the confined root,
     // so claude needs no project directory. Run it in a fresh directory
     // under the temp root, outside the home tree, so no ambient CLAUDE.md
     // loads. The directory is removed after the run.
@@ -134,7 +135,7 @@ pub async fn run(
     outcome
 }
 
-/// Add the read tools, the preamble, the turn cap, and the gaff hook to
+/// Add the bash tool, the preamble, the turn cap, and the gaff hook to
 /// any provider's agent builder, then build it.
 fn configure<M: CompletionModel + 'static>(
     builder: AgentBuilder<M>,
@@ -145,9 +146,7 @@ fn configure<M: CompletionModel + 'static>(
 ) -> rig::agent::Agent<M> {
     let builder = builder
         .preamble(system)
-        .tool(ReadFile(Arc::clone(root)))
-        .tool(Grep(Arc::clone(root)))
-        .tool(ListFiles(Arc::clone(root)))
+        .tool(Bash(Arc::clone(root)))
         .default_max_turns(max_turns);
     let builder = match gaff {
         Some(gaff) => builder.add_hook(crate::hook::GaffHook::new(gaff)),
@@ -167,50 +166,42 @@ async fn drive<M: CompletionModel + 'static>(
         .map_err(|error| RunError::Prompt(error.to_string()))
 }
 
-// The tools. Each wraps the confined root and reports its error as text
-// the model reads.
+// The one tool an agent gets: a shell. kersh does not decide what it may
+// run; the gaff profile does, through the pre-tool-call hook. The command
+// runs in the confined root. A single command tool carries none of the
+// working directory into the model's request, unlike a per-file tool
+// bridged over the root.
 
-struct ReadFile(Arc<Root>);
-struct Grep(Arc<Root>);
-struct ListFiles(Arc<Root>);
+/// The per-command deadline. A read command answers well within it.
+const BASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Deserialize)]
-struct ReadArgs {
-    path: String,
-}
+/// The most output bytes one command returns to the model.
+const BASH_OUTPUT_CAP: usize = 64 * 1024;
 
-#[derive(Deserialize)]
-struct GrepArgs {
-    pattern: String,
-    #[serde(default = "all_files")]
-    glob: String,
-}
+struct Bash(Arc<Root>);
 
 #[derive(Deserialize)]
-struct ListArgs {
-    #[serde(default = "all_files")]
-    glob: String,
+struct BashArgs {
+    command: String,
 }
 
-fn all_files() -> String {
-    "**/*".to_owned()
-}
-
-impl Tool for ReadFile {
-    const NAME: &'static str = "read_file";
-    type Args = ReadArgs;
+impl Tool for Bash {
+    const NAME: &'static str = "bash";
+    type Args = BashArgs;
     type Output = String;
     type Error = ToolError;
 
     fn description(&self) -> String {
-        "Read a text file under the working root, by relative path.".to_owned()
+        "Run a shell command in the working directory and return its output. \
+         Read with it: cat, ls, rg, git diff, and so on."
+            .to_owned()
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": { "path": { "type": "string" } },
-            "required": ["path"]
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
         })
     }
 
@@ -219,66 +210,54 @@ impl Tool for ReadFile {
         _: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        self.0.read_file(&args.path, DEFAULT_MAX_BYTES)
+        let run = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&args.command)
+            .current_dir(self.0.path())
+            .stdin(std::process::Stdio::null())
+            .output();
+        match tokio::time::timeout(BASH_TIMEOUT, run).await {
+            Err(_) => Ok(format!(
+                "(the command did not finish within {BASH_TIMEOUT:?})"
+            )),
+            Ok(Err(source)) => Err(ToolError::Io {
+                path: "sh".to_owned(),
+                source,
+            }),
+            Ok(Ok(output)) => Ok(cap_output(&output)),
+        }
     }
 }
 
-impl Tool for Grep {
-    const NAME: &'static str = "grep";
-    type Args = GrepArgs;
-    type Output = String;
-    type Error = ToolError;
-
-    fn description(&self) -> String {
-        "Search files under the root for a regular expression. Returns path:line:text.".to_owned()
+/// Join a command's stdout and stderr, note a non-zero exit, and cap the
+/// whole to [`BASH_OUTPUT_CAP`] on a character boundary, so the model
+/// reads a failure's message and never an unbounded dump.
+fn cap_output(output: &std::process::Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&stderr);
     }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string" },
-                "glob": { "type": "string", "description": "A path glob, default **/*" }
-            },
-            "required": ["pattern"]
-        })
+    if !output.status.success() {
+        use std::fmt::Write as _;
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_owned(), |c| c.to_string());
+        let _ = write!(text, "\n(the command exited with {code})");
     }
-
-    async fn call(
-        &self,
-        _: &mut ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        Ok(self.0.grep(&args.pattern, &args.glob)?.join("\n"))
+    if text.len() > BASH_OUTPUT_CAP {
+        let mut end = BASH_OUTPUT_CAP;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n(output truncated)");
     }
-}
-
-impl Tool for ListFiles {
-    const NAME: &'static str = "list";
-    type Args = ListArgs;
-    type Output = String;
-    type Error = ToolError;
-
-    fn description(&self) -> String {
-        "List the files under the root that match a path glob.".to_owned()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "glob": { "type": "string", "description": "A path glob, default **/*" }
-            }
-        })
-    }
-
-    async fn call(
-        &self,
-        _: &mut ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        Ok(self.0.list(&args.glob)?.join("\n"))
-    }
+    text
 }
 
 #[cfg(test)]
