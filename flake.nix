@@ -58,7 +58,7 @@
 
           kersh = rustPlatform.buildRustPackage {
             pname = "kersh";
-            version = "0.6.0";
+            version = "0.7.0";
             inherit src;
             cargoLock = {
               lockFile = ./Cargo.lock;

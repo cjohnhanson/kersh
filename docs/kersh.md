@@ -61,5 +61,5 @@ rule apply, and it prepends the profile's session-start context to the
 first turn. Governance is opt-in: without a `profile`, kersh runs
 ungoverned. With one, a broken or absent gaff aborts the run rather than
 degrading. `KERSH_GAFF` names the gaff binary; the default is `gaff` on
-`PATH`. A gaff guard for a kersh agent names kersh's own tools
-(`read_file`, `grep`, `list`).
+`PATH`. A gaff guard for a kersh agent names the `bash` tool and matches
+the `command` field, so the profile decides what the agent may run.

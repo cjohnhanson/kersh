@@ -126,8 +126,7 @@ fn agent_template(name: &str) -> String {
          what it must not do. This body is the system prompt.\n\
          \n\
          The caller supplies the situation with `--context-file` or a pipe.\n\
-         Use the read_file, grep, and list tools to read files under the\n\
-         working root.\n"
+         Use the bash tool to read files: cat, ls, rg, git diff, and so on.\n"
     )
 }
 

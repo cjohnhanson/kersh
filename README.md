@@ -67,18 +67,21 @@ kersh prime
 `render` prints the composed system prompt and first user turn and spends
 nothing, so a prompt is debuggable before a run.
 
-## The tools an agent gets
+## The tool an agent gets
 
-An agent gets three structured read tools, never a shell:
+An agent gets one tool: `bash`. It runs a shell command in the run's root
+and returns the output. The agent reads with it — `cat`, `ls`, `rg`, `git
+diff`, and so on.
 
-- `read_file(path)`: a file under the run's root, capped, with an escaping
-  symlink refused.
-- `grep(pattern, glob)`: ripgrep as a library, no shell and no honored
-  ignore file.
-- `list(glob)`: the files under the root that match a glob.
+kersh does not decide what the command may be. The gaff profile does: every
+tool call passes through `gaff hook`, so the profile's guards refuse a
+command the same way they refuse any tool call. That is the whole point of
+gaff, and it is why the agent needs only a shell. Without a profile, the
+command is unrestricted, so an agent that runs in a repo it does not fully
+control declares one.
 
-A shell command string cannot be guarded, so kersh does not give an agent
-one. Write tools and a command runner are not in this release.
+kersh confines the command to the root and caps its output. A write tool is
+not a separate feature; the profile decides whether the agent may write.
 
 ## Situation and safety
 
@@ -104,10 +107,10 @@ profile's session-start context to the first turn.
 - The profile is selected with `GAFF_PROFILE`, which gaff honors from the
   environment only when `transitions.agent_may_set` names the profile. An
   operator opts a bundle into kersh use by listing it there.
-- A gaff guard names a tool and a field. kersh sends its own tool names,
-  so a guard for a kersh agent names `read_file`, `grep`, or `list`. A
-  base guard written against another host's tool names, such as Claude
-  Code's `Read`, does not apply to a kersh agent.
+- A gaff guard names a tool and a field. kersh's tool is `bash`, so a
+  guard for a kersh agent names `bash` and matches the `command` field —
+  the same shape that guards a Claude Code `Bash` call. A base guard
+  written against a different tool name does not apply to a kersh agent.
 - Governance is opt-in and fail-safe. Without a `profile`, kersh runs
   ungoverned. With one, kersh probes gaff at session start, and a broken
   or absent gaff aborts the run rather than degrading to ungoverned.
@@ -118,10 +121,10 @@ profile's session-start context to the first turn.
 
 ## Status
 
-This is v0.6: agent files, the read tools, prompt composition, both
+This is v0.7: agent files, the `bash` tool, prompt composition, both
 providers, the command surface, `kersh init` scaffolding, gaff
-governance, and almanac skill application. The tools are read-only; a
-write tool and a command runner are not in this release.
+governance, and almanac skill application. What the agent may run is the
+gaff profile's decision, not a kersh feature.
 
 ## License
 
