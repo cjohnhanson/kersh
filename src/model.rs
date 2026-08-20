@@ -60,6 +60,16 @@ pub async fn run(
         .saturating_mul(turns.saturating_add(1))
         .saturating_add(gaff_margin);
 
+    // Claude Code attaches its working directory's files and every
+    // CLAUDE.md up the tree once it has tools, which a large repo balloons
+    // past the token limit. The agent's read tools use the confined root,
+    // so claude needs no project directory. Run it in a fresh directory
+    // under the temp root, outside the home tree, so no ambient CLAUDE.md
+    // loads. The directory is removed after the run.
+    let claude_cwd = std::env::temp_dir().join(format!("kersh-claude-{}", crate::util::nonce()));
+    let _ = std::fs::create_dir_all(&claude_cwd);
+    let claude_cwd_str = claude_cwd.to_string_lossy().into_owned();
+
     let work = async {
         match agent.provider() {
             "claude-code" => {
@@ -68,6 +78,7 @@ pub async fn run(
                         provider: "claude-code".to_owned(),
                         message: error.to_string(),
                     })?
+                    .with_current_dir(claude_cwd_str.clone())
                     .with_timeout(per_call);
                 let built = configure(
                     client.agent(agent.model_id()),
@@ -115,10 +126,12 @@ pub async fn run(
         }
     };
 
-    match tokio::time::timeout(whole_run, work).await {
+    let outcome = match tokio::time::timeout(whole_run, work).await {
         Ok(result) => result,
         Err(_) => Err(RunError::TimedOut(whole_run)),
-    }
+    };
+    let _ = std::fs::remove_dir_all(&claude_cwd);
+    outcome
 }
 
 /// Add the read tools, the preamble, the turn cap, and the gaff hook to
