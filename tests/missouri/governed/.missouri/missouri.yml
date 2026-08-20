@@ -32,6 +32,16 @@ transitions:
       esac
       rm -f fakegaff
 
+      # A profiled agent needs no prompt: its situation comes from gaff's
+      # session start. With no prompt and no context file, the run reaches
+      # the gaff probe rather than the "give a prompt" refusal.
+      OUT=$(KERSH_GAFF=/nonexistent/gaff kersh run reviewer --root "$root" 2>&1)
+      case "$OUT" in
+        *"gaff could not start"*) ;;
+        *"give a prompt"*) echo "FAIL: a profiled agent must not need a prompt: $OUT"; exit 1 ;;
+        *) echo "FAIL: a profiled no-prompt run must reach the gaff probe: $OUT"; exit 1 ;;
+      esac
+
       echo GOVERNED_OK
     target: ../governed-checked
     stdout: "GOVERNED_OK\n"

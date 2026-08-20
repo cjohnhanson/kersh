@@ -258,7 +258,11 @@ fn run_agent(rest: &[String]) -> ExitCode {
         None => None,
     };
     let prompt = positional_after(rest, &name).unwrap_or_default();
-    if prompt.trim().is_empty() && context.is_none() {
+    // An agent with a profile takes its situation from gaff's session-start
+    // injection, so it needs no prompt on the command line. Without a
+    // profile, the caller supplies the situation as a prompt or a context
+    // file, or there is nothing for the agent to act on.
+    if prompt.trim().is_empty() && context.is_none() && agent.meta.profile.is_none() {
         return fail("give a prompt, or context with --context-file");
     }
 

@@ -118,7 +118,7 @@ profile's session-start context to the first turn.
 
 ## Status
 
-This is v0.4: agent files, the read tools, prompt composition, both
+This is v0.5: agent files, the read tools, prompt composition, both
 providers, the command surface, `kersh init` scaffolding, gaff
 governance, and almanac skill application. The tools are read-only; a
 write tool and a command runner are not in this release.
