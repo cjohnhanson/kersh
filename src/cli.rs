@@ -318,6 +318,18 @@ fn run_agent(rest: &[String]) -> ExitCode {
         &crate::util::nonce(),
     );
 
+    // A profiled agent takes its whole situation from gaff's session-start
+    // injection. When that injection is empty and no prompt was given, the
+    // first turn is empty and there is nothing to act on. The model layer
+    // would report only an opaque empty-transcript error, so fail here with
+    // the cause. The earlier guard cannot catch this: gaff answers the
+    // injection at run time, not before.
+    if let Err(message) =
+        situation_present(&composed.first_turn, agent.meta.profile.as_deref(), &name)
+    {
+        return fail(&message);
+    }
+
     let outcome = runtime.block_on(crate::model::run(
         &agent,
         root,
@@ -354,6 +366,26 @@ fn combine_context(gaff: Option<String>, file: Option<String>) -> Option<String>
         (Some(gaff), None) => Some(gaff),
         (Some(gaff), Some(file)) => Some(format!("{gaff}\n\n{file}")),
     }
+}
+
+/// Check that the first user turn carries a situation to act on.
+///
+/// A profiled agent draws its situation from gaff's session-start
+/// injection at run time. When that injection is empty and no prompt was
+/// given, the turn is empty. The error names the profile so the operator
+/// looks at what the profile should have injected. Without a profile the
+/// empty turn means the caller gave neither a prompt nor a context file.
+fn situation_present(first_turn: &str, profile: Option<&str>, name: &str) -> Result<(), String> {
+    if !first_turn.trim().is_empty() {
+        return Ok(());
+    }
+    Err(match profile {
+        Some(profile) => format!(
+            "the `{profile}` profile injected no context and no prompt was given, \
+             so `{name}` has nothing to act on (is anything staged?)"
+        ),
+        None => "give a prompt, or context with --context-file".to_owned(),
+    })
 }
 
 /// Read `--context-file`, where `-` means standard input.
@@ -449,6 +481,24 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn an_empty_turn_under_a_profile_names_the_profile() {
+        let error = situation_present("   \n", Some("commit-msg"), "commit-msg").unwrap_err();
+        assert!(error.contains("commit-msg"), "{error}");
+        assert!(error.contains("injected no context"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_turn_without_a_profile_asks_for_a_prompt() {
+        let error = situation_present("", None, "explain").unwrap_err();
+        assert!(error.contains("give a prompt"), "{error}");
+    }
+
+    #[test]
+    fn a_turn_with_content_is_accepted() {
+        assert!(situation_present("a diff", Some("commit-msg"), "commit-msg").is_ok());
     }
 
     fn root_with_agent() -> tempfile::TempDir {
