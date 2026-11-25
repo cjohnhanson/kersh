@@ -3,8 +3,9 @@
 //! Each is a pure function over a confined root, implemented with
 //! ripgrep's libraries, so there is no shell and no honored ignore or
 //! config file an attacker could plant. A path outside the root, or a
-//! symlink that escapes it, is refused. The agent never gets a bash tool,
-//! because a shell command string cannot be guarded.
+//! symlink that escapes it, is refused. The `bash` tool is not here: it
+//! lives in `model.rs` and runs its command in the same root; an agent with
+//! a gaff profile has each call checked by gaff's hooks first.
 
 use std::path::{Path, PathBuf};
 
