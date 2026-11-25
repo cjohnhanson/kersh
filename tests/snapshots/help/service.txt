@@ -1,0 +1,11 @@
+Install or stop the kersh-host unit, which starts the host at login
+
+Usage: kersh service <COMMAND>
+
+Commands:
+  install  Write the kersh-host unit and load it, so the host runs at login
+  stop     Stop the kersh-host unit and remove it. Sessions keep running
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

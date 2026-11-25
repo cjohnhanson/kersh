@@ -115,6 +115,15 @@ pub enum SessionCmd {
     Memories {
         root: Option<PathBuf>,
     },
+    Doctor {
+        json: bool,
+    },
+    ServiceInstall {
+        json: bool,
+    },
+    ServiceStop {
+        json: bool,
+    },
     Host {
         state: Option<PathBuf>,
     },
@@ -152,6 +161,24 @@ fn report(error: &SessionError) -> ExitCode {
 fn fail(message: &str) -> ExitCode {
     eprintln!("kersh: {message}");
     ExitCode::FAILURE
+}
+
+/// Print a `kersh service` result: its detail line, or its JSON.
+fn service_result(
+    result: Result<crate::service::ServiceStatus, SessionError>,
+    json: bool,
+) -> ExitCode {
+    match result {
+        Ok(status) => {
+            if json {
+                json_line(&status);
+            } else {
+                println!("{}", status.detail);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => report(&error),
+    }
 }
 
 /// Print `value` as one JSON line; false when stdout is gone.
@@ -420,6 +447,41 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
             }
             Err(error) => report(&error),
         },
+        SessionCmd::Doctor { json } => match client().doctor() {
+            Ok(report) => {
+                for item in &report.items {
+                    if json {
+                        json_line(item);
+                    } else {
+                        let flag = if item.required && !item.state.passes() {
+                            "  [required]"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "{:<14} {:<8} {}: {}{flag}",
+                            item.state.as_str(),
+                            item.area,
+                            item.check,
+                            item.detail
+                        );
+                    }
+                }
+                if report.ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    if !json {
+                        eprintln!(
+                            "kersh: a required piece is missing; see the lines marked required"
+                        );
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => report(&error),
+        },
+        SessionCmd::ServiceInstall { json } => service_result(client().service_install(), json),
+        SessionCmd::ServiceStop { json } => service_result(client().service_stop(), json),
         SessionCmd::Memories { root } => match client().memories(root.as_deref()) {
             Ok(text) => {
                 print!("{text}");

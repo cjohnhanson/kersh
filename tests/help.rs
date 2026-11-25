@@ -17,7 +17,7 @@ use std::process::Command;
 const COMMANDS: &[&str] = &[
     "init", "list", "show", "check", "render", "run", "docs", "prime", "ps", "start", "attach",
     "stop", "resume", "restart", "send", "events", "screen", "rm", "harness", "agent", "runtime",
-    "setup", "memories", "serve",
+    "setup", "doctor", "service", "memories", "serve",
     #[cfg(feature = "tui")]
     "tui",
     "host",

@@ -1,0 +1,25 @@
+# The wheel carries the binary. maturin's `bin` bindings put the Cargo
+# bin target into `<dist>.data/scripts/`, which an installer copies onto
+# PATH: one wheel per platform, the binary inside it, nothing downloaded
+# at install time.
+#
+# The distribution is `kersh-cli` because another project holds `kersh`
+# on PyPI. The command is still `kersh`: it comes from the Cargo bin name.
+# No `[project.scripts]`: maturin refuses it beside a binary.
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kersh-cli"
+description = "A declarative agent runner: a markdown file names a model, a skill, and a profile."
+# The version lives in Cargo.toml and is read from there.
+dynamic = ["version"]
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+strip = true

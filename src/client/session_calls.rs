@@ -168,34 +168,35 @@ impl Client {
             ));
         }
         crate::paths::private_dir(&self.paths.state).map_err(failed)?;
-        let mut argv = crate::service::entry();
-        argv.extend([
-            "host".to_owned(),
-            "--state".to_owned(),
-            self.paths.state.display().to_string(),
-        ]);
-        let env: Vec<(String, String)> = crate::login_env::PASSED
-            .iter()
-            .filter_map(|key| {
-                std::env::var(key)
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .map(|value| ((*key).to_owned(), value))
-            })
-            .chain(std::iter::once((
-                "PATH".to_owned(),
-                "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
-            )))
-            .collect();
-        crate::service::spawn(
-            config.service_manager(),
-            &crate::host::label(&self.paths, "host"),
-            &argv,
-            &env,
-            &self.paths.state.join("host.log"),
-            &self.paths.state,
-        )
-        .map_err(SessionError::failed)?;
+        let manager = config.service_manager();
+        // An installed unit that does not start (launchd has not loaded
+        // it, or systemd refuses it) falls back to a one-shot host. A
+        // systemd unit that is only not enabled still starts here.
+        // host.lock keeps a second host from running if the unit starts
+        // one later.
+        let unit_started = crate::service::installed_for(manager, &self.paths)
+            && match crate::service::start_unit(manager) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "kersh: the {} unit did not start ({error}); starting a one-shot host \
+                         instead. `kersh service install` reloads the unit.",
+                        crate::service::UNIT
+                    );
+                    false
+                }
+            };
+        if !unit_started {
+            crate::service::spawn(
+                manager,
+                &crate::host::label(&self.paths, "host"),
+                &crate::service::host_argv(&self.paths),
+                &crate::service::host_env(),
+                &self.paths.state.join("host.log"),
+                &self.paths.state,
+            )
+            .map_err(SessionError::failed)?;
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Ok(stream) = UnixStream::connect(&socket) {
@@ -576,6 +577,30 @@ impl Client {
         let config = Config::load(&self.paths).map_err(SessionError::failed)?;
         let root = root.map(Path::to_path_buf).or(config.memory.root);
         crate::memories::generate(root.as_deref()).map_err(SessionError::failed)
+    }
+
+    /// Write and load the `kersh-host` unit, which starts the host at
+    /// login. `kersh service install`.
+    pub fn service_install(&self) -> Result<crate::service::ServiceStatus, SessionError> {
+        let config = Config::load(&self.paths).map_err(SessionError::failed)?;
+        crate::service::install(config.service_manager(), &self.paths).map_err(SessionError::failed)
+    }
+
+    /// Stop, unload, and remove the `kersh-host` unit. `kersh service
+    /// stop`.
+    pub fn service_stop(&self) -> Result<crate::service::ServiceStatus, SessionError> {
+        let config = Config::load(&self.paths).map_err(SessionError::failed)?;
+        crate::service::stop(config.service_manager()).map_err(SessionError::failed)
+    }
+
+    /// Check the harnesses, the host and server, the service unit, gaff
+    /// and its registration, the guard per harness and mode, and the
+    /// eng.rip tools, against the login environment. `kersh doctor`.
+    pub fn doctor(&self) -> Result<crate::doctor::DoctorReport, SessionError> {
+        let config = Config::load(&self.paths).map_err(SessionError::failed)?;
+        let login =
+            crate::login_env::capture(&crate::service::entry()).map_err(SessionError::failed)?;
+        Ok(crate::doctor::doctor(&self.paths, &config, &login))
     }
 }
 

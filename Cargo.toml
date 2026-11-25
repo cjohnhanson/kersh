@@ -1,10 +1,39 @@
 [package]
 name = "kersh"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A declarative agent runner: a markdown file names a model, a skill, and a profile."
 license = "MIT"
+repository = "https://github.com/cjohnhanson/kersh"
+homepage = "https://github.com/cjohnhanson/kersh"
+readme = "README.md"
+keywords = ["agents", "mcp", "cli", "terminal", "sessions"]
+categories = ["command-line-utilities", "development-tools"]
+
+# Repository machinery stays on GitHub. A consumer installing the crate
+# gets the source, the bundled manual, the license, and the README.
+exclude = [
+    # The npm wrapper and its generator are release machinery; a
+    # generated platform package holds a built binary, which must never
+    # ship inside the crate.
+    "npm/",
+    "homebrew/",
+    # These read .github/, npm/, homebrew/, and scripts/, all dropped.
+    "tests/release.rs",
+    "tests/seam_real_gaff.sh",
+    "tests/missouri/",
+    "tests/probes/",
+    ".gaff/",
+    ".github/",
+    ".agents/",
+    "scripts/",
+    "almanac.yml",
+    "AGENTS.md",
+    "flake.nix",
+    "flake.lock",
+    "rust-toolchain.toml",
+]
 
 [lints.clippy]
 unwrap_used = "warn"
@@ -83,3 +112,17 @@ tempfile = "3"
 insta = "1.49"
 # Checks that the served OpenAPI document parses as OpenAPI 3.1.
 oas3 = "0.20"
+
+# `cargo deb` reads this for the .deb the release attaches to the GitHub
+# release. It installs with `dpkg -i`; it is not an apt repository.
+[package.metadata.deb]
+maintainer = "cjohnhanson <cjohnhanson@users.noreply.github.com>"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+extended-description = "A declarative agent runner: a markdown file names a model, a skill, and a profile."
+assets = [
+    ["target/release/kersh", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/kersh/README", "644"],
+    ["LICENSE", "usr/share/doc/kersh/LICENSE", "644"],
+]

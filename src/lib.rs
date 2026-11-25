@@ -7,8 +7,9 @@
 //! guards, and its stop rule, so kersh declares none of that itself.
 //!
 //! The agent gets one tool, a shell. The gaff profile decides what it may
-//! run, because gaff guards a tool call. kersh confines the command to the
-//! root and caps its output; the profile does the rest. See [`model`].
+//! run, because gaff guards a tool call. kersh runs the command in the
+//! root's directory and caps its output; it does not confine the command,
+//! and an agent without a profile is unrestricted. See [`model`].
 
 #![forbid(unsafe_code)]
 
@@ -18,6 +19,7 @@ mod cli_sessions;
 pub mod client;
 pub mod compose;
 pub mod discover;
+pub mod doctor;
 pub mod events;
 #[cfg(feature = "fake-model")]
 pub mod fake_model;

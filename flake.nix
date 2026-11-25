@@ -58,7 +58,8 @@
 
           kersh = rustPlatform.buildRustPackage {
             pname = "kersh";
-            version = "0.7.0";
+            # Read from the manifest, so a release edits one file.
+            version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
             inherit src;
             cargoLock = {
               lockFile = ./Cargo.lock;

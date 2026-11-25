@@ -62,6 +62,8 @@ pub enum ServiceManager {
     None,
     /// A one-shot launchd job (macOS).
     Launchd,
+    /// A transient `systemd-run --user` unit (Linux).
+    Systemd,
 }
 
 /// The memory settings.
@@ -78,7 +80,8 @@ pub struct MemoryConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// `none` or `launchd`; launchd on macOS by default, else none.
+    /// `none`, `launchd`, or `systemd`. The default is launchd on macOS,
+    /// systemd on Linux when a user manager runs, else none.
     #[serde(default)]
     pub service_manager: Option<ServiceManager>,
     /// Whether a client that needs a write starts a host. Default true.
@@ -119,6 +122,8 @@ impl Config {
         self.service_manager
             .unwrap_or(if cfg!(target_os = "macos") {
                 ServiceManager::Launchd
+            } else if cfg!(target_os = "linux") && crate::service::systemd_user_manager() {
+                ServiceManager::Systemd
             } else {
                 ServiceManager::None
             })
