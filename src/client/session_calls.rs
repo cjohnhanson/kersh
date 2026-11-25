@@ -295,6 +295,19 @@ impl Client {
         from_value(self.call(Op::Restart { id: id.to_owned() })?)
     }
 
+    /// Stop the session server by its recorded pid, start a new one, and
+    /// restore every session from its record and last capture. The way
+    /// past a server of another rmux wire version. `kersh restart --mux`.
+    pub fn restart_mux(&self) -> Result<Vec<Record>, SessionError> {
+        from_value(self.call(Op::RestartMux)?)
+    }
+
+    /// RET in a held pane, from the pane's wrapper: the host runs the
+    /// held command, gated like a resume.
+    pub(crate) fn held_return(&self, id: &str) -> Result<(), SessionError> {
+        self.call(Op::HeldReturn { id: id.to_owned() }).map(|_| ())
+    }
+
     /// Type `text` into a running interactive session, then Enter.
     /// `kersh send`.
     pub fn send(&self, id: &str, text: &str) -> Result<(), SessionError> {
@@ -339,7 +352,14 @@ impl Client {
     /// Hand this terminal to the session until `C-]`. `kersh attach`.
     pub fn attach(&self, id: &str) -> Result<(), SessionError> {
         let record = self.record(id)?;
-        crate::mux::attach(&self.paths, &record.rmux_session).map_err(SessionError::failed)
+        let result =
+            crate::mux::attach(&self.paths, &record.rmux_session).map_err(SessionError::failed);
+        // A detach is one of the times the screen is captured, for a
+        // restore to print above the agent. Only a running host does it.
+        if self.connect_host(false).is_ok() {
+            let _ = self.call(Op::Capture { id: id.to_owned() });
+        }
+        result
     }
 
     /// The build each harness would run: the host's answer when one runs,

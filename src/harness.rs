@@ -116,16 +116,24 @@ fn codex_argv(spec: &LaunchSpec<'_>) -> Vec<String> {
         argv.extend(["-m".to_owned(), model.to_owned()]);
     }
     argv.extend(spec.flags.iter().cloned());
-    if let Conversation::Resume(id) = spec.conversation {
+    let resume = if let Conversation::Resume(id) = spec.conversation {
         argv.extend(["resume".to_owned(), id.to_owned()]);
-    }
-    match spec.mode {
-        Mode::Headless => argv.push("-".to_owned()),
-        Mode::Interactive => {
-            if let Some(prompt) = spec.prompt_arg {
-                argv.extend(["--".to_owned(), prompt.to_owned()]);
-            }
+        true
+    } else {
+        false
+    };
+    match (spec.mode, spec.prompt_arg) {
+        (Mode::Headless, _) => argv.push("-".to_owned()),
+        // `codex resume [SESSION_ID] [PROMPT]`, as `codex resume --help`
+        // documents it: the prompt follows the id. A prompt that looks
+        // like an option goes after `--`.
+        (Mode::Interactive, Some(prompt)) if resume && !prompt.starts_with('-') => {
+            argv.push(prompt.to_owned());
         }
+        (Mode::Interactive, Some(prompt)) => {
+            argv.extend(["--".to_owned(), prompt.to_owned()]);
+        }
+        (Mode::Interactive, None) => {}
     }
     argv
 }
@@ -311,6 +319,25 @@ pub fn resolve(harness: Harness, login_env: &[(String, String)]) -> Result<Build
     })
 }
 
+/// The build a restore runs: the recorded path when it still runs, else
+/// the one on the login `PATH`, with the version it reports now.
+pub fn recheck(
+    harness: Harness,
+    recorded: &Build,
+    login_env: &[(String, String)],
+) -> Result<Build, String> {
+    if recorded.path.is_file()
+        && let Ok(version) = version_of(&recorded.path, login_env)
+    {
+        return Ok(Build {
+            installer: recorded.installer.clone(),
+            path: recorded.path.clone(),
+            version,
+        });
+    }
+    resolve(harness, login_env)
+}
+
 /// The first line `<path> --version` prints, run with the login
 /// environment and a deadline.
 fn version_of(path: &Path, login_env: &[(String, String)]) -> Result<String, String> {
@@ -450,6 +477,36 @@ mod tests {
                 "t-1",
                 "-",
             ])
+        );
+    }
+
+    #[test]
+    fn codex_interactive_resume_takes_the_prompt_after_the_id() {
+        let argv = argv(&spec(
+            Harness::Codex,
+            Mode::Interactive,
+            Conversation::Resume("t-1"),
+        ));
+        assert_eq!(
+            argv.get(argv.len() - 3..).unwrap(),
+            strings(&["resume", "t-1", "go"])
+        );
+        let mut dashed = spec(
+            Harness::Codex,
+            Mode::Interactive,
+            Conversation::Resume("t-1"),
+        );
+        dashed.prompt_arg = Some("-x");
+        let argv = super::argv(&dashed);
+        assert_eq!(argv.get(argv.len() - 2..).unwrap(), strings(&["--", "-x"]));
+        let fresh = super::argv(&spec(
+            Harness::Codex,
+            Mode::Interactive,
+            Conversation::New(None),
+        ));
+        assert_eq!(
+            fresh.get(fresh.len() - 2..).unwrap(),
+            strings(&["--", "go"])
         );
     }
 

@@ -51,10 +51,12 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs` | rig, the built-in harness, and its gaff governance |
 | `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol, each with a schema number |
 | `src/host.rs`, `src/wrapper.rs`, `src/mux.rs`, `src/service.rs` | the host (single writer), the pane wrapper and its exit cases, the rmux server and attach client, and how the host and server start |
+| `src/host/restoring.rs`, `src/restore.rs` | restore of lost sessions, held panes and RET, screen captures, `restart --mux`; the name-only transcript and rollout checks and the 30-day prune |
 | `src/harness.rs`, `src/runtime.rs`, `src/login_env.rs`, `src/guard.rs`, `src/discover.rs` | launch argv and the flag allow-list per harness, runtimes and settings order, the login environment, profile checks, and the process table: Codex conversation discovery and the check that no other harness process runs a conversation |
 | `src/client/session_calls.rs`, `src/cli_sessions.rs` | the session calls on `Client` and their commands |
 | `src/setup.rs`, `src/memories.rs` | `kersh setup` and `kersh memories` |
 | `tests/sessions.rs`, `tests/fixtures/` | sessions end to end: a real session server on a temp socket, fake `claude` and `codex` scripts, canned streams |
+| `tests/restore.rs`, `tests/support/` | restore end to end: `kill -9` of the server, one vanished session, `restart --mux`, on the same kind of harness |
 | `tests/help.rs`, `tests/snapshots/help/` | `--help` snapshots for every command |
 | `tests/missouri/` | state-transition suites; `gaff-runner` holds gaff's hook-agent contract |
 | `tests/probes/` | probes of real harnesses; they need network and a signed-in harness, so no gate runs them |

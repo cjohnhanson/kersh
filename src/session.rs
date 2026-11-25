@@ -236,6 +236,42 @@ pub struct Conversation {
     pub source: ConversationSource,
 }
 
+/// How a restore left a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreOutcome {
+    /// The harness resumed its conversation.
+    Resumed,
+    /// The pane holds its command until a person decides.
+    Held,
+}
+
+/// One restore of a session, newest last on the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restore {
+    pub at: String,
+    /// What took the session down: `a reboot`, `the session server
+    /// stopped`, `kersh restart --mux`, or the wrapper's own reason.
+    pub after: String,
+    pub outcome: RestoreOutcome,
+    /// The build change, when the harness build differs from the
+    /// recorded one: `2.1.0 -> 2.2.0`.
+    pub build_change: Option<String>,
+    /// The line a front end shows: `restored at <time> after <cause>;
+    /// tools that were running did not finish`.
+    pub line: String,
+}
+
+/// What RET runs in a held pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldRun {
+    /// The first launch again: a new conversation with the first prompt.
+    Fresh,
+    /// The harness's resume of the recorded conversation.
+    Resume,
+}
+
 /// A pane size in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSize {
@@ -288,7 +324,12 @@ pub struct Record {
     /// Why the session is held or ended: `exit status 3`, `interrupted`,
     /// `stopped`.
     pub reason: Option<String>,
-    pub restores: u32,
+    /// Every restore, oldest first.
+    #[serde(default)]
+    pub restores: Vec<Restore>,
+    /// What RET runs while the session is held, when RET runs anything.
+    #[serde(default)]
+    pub held_run: Option<HeldRun>,
     /// How many times the session was resumed or restarted.
     pub launches: u32,
     /// The last progress line, filled when a record is read for a list.

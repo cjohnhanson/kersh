@@ -80,22 +80,55 @@ pub fn read_lock(paths: &Paths) -> Option<MuxLock> {
     serde_json::from_str(&text).ok()
 }
 
-/// Refuse a server that speaks another wire version.
+/// Whether a live server holds `mux.lock`. A lock file no process holds
+/// is left from a server that is gone.
+#[must_use]
+pub fn lock_held(paths: &Paths) -> bool {
+    let Ok(file) = std::fs::File::open(paths.mux_lock()) else {
+        return false;
+    };
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared).is_err()
+}
+
+/// Refuse a live server that speaks another wire version.
 pub fn check_wire(paths: &Paths) -> Result<(), String> {
     match read_lock(paths) {
-        Some(lock) if lock.wire_version != WIRE_VERSION => Err(format!(
+        Some(lock) if lock.wire_version != WIRE_VERSION && lock_held(paths) => Err(format!(
             "the session server runs kersh {} (rmux wire {}), and this kersh {} speaks wire {}; \
-             stop that server with `kill {}` (its pid in {}), then run the command again; \
-             its panes close with it",
+             `kersh restart --mux` restarts it and restores every session",
             lock.version,
             lock.wire_version,
             env!("CARGO_PKG_VERSION"),
             WIRE_VERSION,
-            lock.pid,
-            paths.mux_lock().display()
         )),
         _ => Ok(()),
     }
+}
+
+/// Stop the live server by the pid it recorded, with SIGTERM, and wait up
+/// to `wait` for it to release `mux.lock`.
+pub fn stop_server(paths: &Paths, wait: Duration) -> Result<(), String> {
+    if !lock_held(paths) {
+        return Ok(());
+    }
+    let lock = read_lock(paths).ok_or_else(|| "mux.lock names no server".to_owned())?;
+    let pid = i32::try_from(lock.pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| format!("mux.lock names pid {}", lock.pid))?;
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+        .map_err(|error| format!("cannot stop the session server (pid {}): {error}", lock.pid))?;
+    let deadline = std::time::Instant::now() + wait;
+    while lock_held(paths) {
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "the session server (pid {}) did not stop after SIGTERM",
+                lock.pid
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// The server role: hold `mux.lock`, write the config, and serve the
@@ -391,7 +424,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_wire_mismatch_names_the_server_to_stop() {
+    fn a_wire_mismatch_on_a_live_server_names_restart_mux() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::new(tmp.path().join("state"), tmp.path().join("config"));
         crate::paths::private_dir(&paths.state).unwrap();
@@ -404,12 +437,14 @@ mod tests {
             build_id: "x".to_owned(),
         };
         crate::paths::write_json(&paths.mux_lock(), &lock).unwrap();
-        let error = check_wire(&paths).unwrap_err();
-        assert!(!error.contains("restart --mux"), "{error}");
-        assert!(error.contains("kill 4242"), "{error}");
         assert!(
-            error.contains(&paths.mux_lock().display().to_string()),
-            "{error}"
+            check_wire(&paths).is_ok(),
+            "a lock no process holds is left from a server that is gone"
         );
+        let held = std::fs::File::open(paths.mux_lock()).unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        let error = check_wire(&paths).unwrap_err();
+        assert!(error.contains("kersh 0.0.1"), "{error}");
+        assert!(error.contains("`kersh restart --mux`"), "{error}");
     }
 }

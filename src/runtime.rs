@@ -92,6 +92,12 @@ pub struct Config {
     /// `COLORFGBG` for every pane; `15;0` (light on dark) by default.
     #[serde(default)]
     pub colorfgbg: Option<String>,
+    /// Whether the host brings lost sessions back. Default true.
+    #[serde(default)]
+    pub restore: Option<bool>,
+    /// Seconds between screen captures of each session. Default 180.
+    #[serde(default)]
+    pub capture_seconds: Option<u64>,
 }
 
 impl Config {
@@ -121,6 +127,17 @@ impl Config {
     #[must_use]
     pub fn auto_start(&self) -> bool {
         self.auto_start.unwrap_or(true)
+    }
+
+    #[must_use]
+    pub fn restore(&self) -> bool {
+        self.restore.unwrap_or(true)
+    }
+
+    /// The time between screen captures, at least one second.
+    #[must_use]
+    pub fn capture_every(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.capture_seconds.unwrap_or(180).max(1))
     }
 }
 

@@ -16,7 +16,7 @@ Commands:
   attach    Drop into a session's terminal. C-] leaves it running
   stop      End a session and close its pane
   resume    Continue a held or ended session's conversation in a new pane
-  restart   Restart an interactive session on its conversation
+  restart   Restart an interactive session on its conversation, or the session server with --mux
   send      Type text into a running interactive session, then Enter
   events    Print a headless session's events as JSON lines
   screen    Print a session's screen as plain text

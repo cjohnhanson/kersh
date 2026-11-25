@@ -108,6 +108,12 @@ impl Paths {
         self.session(id).join("note.json")
     }
 
+    /// The session's last screen capture, printed above it on restore.
+    #[must_use]
+    pub fn capture(&self, id: &str) -> PathBuf {
+        self.session(id).join("capture.txt")
+    }
+
     #[must_use]
     pub fn config_file(&self) -> PathBuf {
         self.config.join("config.yml")

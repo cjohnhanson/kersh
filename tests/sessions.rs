@@ -555,12 +555,14 @@ fn sigterm_to_the_wrapper_leaves_the_record_running_for_restore() {
     let wrapper = i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap();
     let harness = i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap();
     kill(wrapper, "TERM");
-    let record = env.wait(&id, "the signal reason", |r| {
-        r["reason"]
+    // Left running, the session is restored by the host that watches it;
+    // this fake keeps no transcript, so the restore holds it.
+    let record = env.wait(&id, "the restore after SIGTERM", |r| {
+        r["restores"][0]["after"]
             .as_str()
-            .is_some_and(|reason| reason.contains("SIGTERM"))
+            .is_some_and(|after| after.contains("SIGTERM"))
     });
-    assert_eq!(record["state"], "running");
+    assert_eq!(record["restores"][0]["outcome"], "held");
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(harness) {
         assert!(
@@ -580,12 +582,12 @@ fn sighup_to_the_wrapper_leaves_the_record_running_too() {
         i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
         "HUP",
     );
-    let record = env.wait(&id, "the signal reason", |r| {
-        r["reason"]
+    let record = env.wait(&id, "the restore after SIGHUP", |r| {
+        r["restores"][0]["after"]
             .as_str()
-            .is_some_and(|reason| reason.contains("SIGHUP"))
+            .is_some_and(|after| after.contains("SIGHUP"))
     });
-    assert_eq!(record["state"], "running");
+    assert_eq!(record["restores"][0]["outcome"], "held");
 }
 
 #[test]
