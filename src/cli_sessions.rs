@@ -459,7 +459,7 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
                             ""
                         };
                         println!(
-                            "{:<11} {:<8} {}: {}{flag}",
+                            "{:<14} {:<8} {}: {}{flag}",
                             item.state.as_str(),
                             item.area,
                             item.check,

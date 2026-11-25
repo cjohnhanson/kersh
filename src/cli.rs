@@ -246,7 +246,9 @@ enum Command {
     /// unit, gaff and its hooks, the guard for each harness and mode, and
     /// the eng.rip tools, against the login environment. Required: kersh
     /// and gaff on the login PATH, gaff's hooks for each harness found,
-    /// and a running host or session server of this kersh's version.
+    /// and this kersh's version in a host or session server that runs. A
+    /// stopped host or session server is not required; it starts when
+    /// needed.
     Doctor {
         #[command(flatten)]
         json: JsonArg,

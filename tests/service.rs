@@ -35,6 +35,7 @@ case "$1" in
     esac ;;
   bootout) case "$2" in */kersh-host) rm -f "$HOME/launchd-loaded" ;; esac ;;
   kickstart)
+    [ -f "$HOME/launchd-loaded" ] || { echo "Could not find service" >&2; exit 113; }
     if [ -n "$FAKE_KERSH" ]; then
       nohup "$FAKE_KERSH" host --state "$FAKE_STATE" >> "$HOME/fake-host.log" 2>&1 &
     fi ;;
@@ -195,6 +196,139 @@ fn no_service_manager_installs_no_unit() {
     );
     assert!(take(&env, "launchctl").is_empty());
     assert!(take(&env, "systemctl").is_empty());
+}
+
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn the_unit_file_is_private() {
+    for (manager, unit) in [
+        ("launchd", "Library/LaunchAgents/kersh-host.plist"),
+        ("systemd", ".config/systemd/user/kersh-host.service"),
+    ] {
+        let env = env_with(manager);
+        let install = env.kersh(&["service", "install"]);
+        assert!(install.status.success(), "{}", stderr(&install));
+        assert_eq!(mode(&env.home().join(unit)), 0o600, "{manager}");
+    }
+}
+
+#[test]
+fn an_install_over_an_unloaded_unit_loads_it() {
+    let env = env_with("launchd");
+    let domain = format!("gui/{}", uid());
+    let plist = env.home().join("Library/LaunchAgents/kersh-host.plist");
+    let first = env.kersh(&["service", "install"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    take(&env, "launchctl");
+
+    // Unloaded outside kersh, as `launchctl bootout` would leave it.
+    std::fs::remove_file(env.home().join("launchd-loaded")).unwrap();
+    let again = env.kersh(&["service", "install", "--json"]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(json(&again)["changed"], false);
+    assert_eq!(
+        take(&env, "launchctl"),
+        [
+            format!("print {domain}/kersh-host"),
+            format!("bootstrap {domain} {}", plist.display()),
+        ]
+    );
+    assert!(env.home().join("launchd-loaded").exists());
+}
+
+/// `kersh doctor --json`'s line for the unit, with `state_home` as
+/// `XDG_STATE_HOME`.
+fn doctor_unit(env: &Env, state_home: &std::path::Path) -> serde_json::Value {
+    let output = env
+        .command(&["doctor", "--json"])
+        .env("XDG_STATE_HOME", state_home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|item| item["area"] == "service")
+        .unwrap_or_else(|| panic!("no service line: {}", stderr(&output)))
+}
+
+#[test]
+fn a_unit_for_another_state_directory_is_not_this_ones() {
+    let env = env_with("launchd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    let own = env.state().parent().unwrap().to_path_buf();
+    assert_eq!(doctor_unit(&env, &own)["state"], "ok");
+
+    let other = env.home().join("other-state");
+    let unit = doctor_unit(&env, &other);
+    assert_eq!(unit["state"], "missing", "{unit}");
+    assert!(
+        unit["detail"]
+            .as_str()
+            .unwrap()
+            .contains("another state directory"),
+        "{unit}"
+    );
+}
+
+#[test]
+fn doctor_reports_an_unloaded_unit() {
+    let env = env_with("launchd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::remove_file(env.home().join("launchd-loaded")).unwrap();
+    let unit = doctor_unit(&env, env.state().parent().unwrap());
+    assert_eq!(unit["state"], "unloaded", "{unit}");
+    assert!(
+        unit["detail"]
+            .as_str()
+            .unwrap()
+            .contains("kersh service install"),
+        "{unit}"
+    );
+}
+
+#[test]
+fn an_unloaded_unit_falls_back_to_a_one_shot_host() {
+    let env = env_with("launchd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::remove_file(env.home().join("launchd-loaded")).unwrap();
+    take(&env, "launchctl");
+
+    let output = env
+        .command(&["stop", "nosuch"])
+        .env("FAKE_KERSH", env!("CARGO_BIN_EXE_kersh"))
+        .env("FAKE_STATE", env.state())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let calls = take(&env, "launchctl");
+    env.stop_host();
+    let err = stderr(&output);
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == &format!("kickstart gui/{}/kersh-host", uid())),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("bootstrap ") && call.contains("kersh.host.")),
+        "no one-shot host after the unit failed: {calls:?}"
+    );
+    assert!(err.contains("nosuch"), "the host did not answer: {err}");
+    assert_eq!(
+        err.matches("kersh service install").count(),
+        1,
+        "the fallback is not said once: {err}"
+    );
 }
 
 #[test]

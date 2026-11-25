@@ -37,6 +37,11 @@ pub enum CheckState {
     Unguarded,
     /// Whether the guard runs cannot be confirmed.
     Unconfirmed,
+    /// The unit file is installed, and the service manager has not
+    /// loaded it.
+    Unloaded,
+    /// The check does not apply to this configuration.
+    NotApplicable,
 }
 
 impl CheckState {
@@ -56,6 +61,8 @@ impl CheckState {
             Self::Guarded => "guarded",
             Self::Unguarded => "unguarded",
             Self::Unconfirmed => "unconfirmed",
+            Self::Unloaded => "unloaded",
+            Self::NotApplicable => "not_applicable",
         }
     }
 }
@@ -395,10 +402,11 @@ pub fn doctor(paths: &Paths, config: &Config, login: &[(String, String)]) -> Doc
         ..item(
             "service",
             crate::service::UNIT,
-            if service.installed {
-                CheckState::Ok
-            } else {
-                CheckState::Missing
+            match (&service.unit, service.installed, service.loaded) {
+                (None, _, _) => CheckState::NotApplicable,
+                (Some(_), true, true) => CheckState::Ok,
+                (Some(_), true, false) => CheckState::Unloaded,
+                (Some(_), false, _) => CheckState::Missing,
             },
             false,
             service.detail,

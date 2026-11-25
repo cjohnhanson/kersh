@@ -429,6 +429,11 @@ pub struct ServiceStatus {
     pub unit: Option<PathBuf>,
     /// The unit file exists and runs the host for this state directory.
     pub installed: bool,
+    /// The service manager has the unit: launchd has loaded it, or
+    /// systemd has it enabled. An installed unit that is not loaded
+    /// starts no host until `kersh service install` loads it again.
+    #[serde(default)]
+    pub loaded: bool,
     /// This call wrote or removed the unit file.
     pub changed: bool,
     pub detail: String,
@@ -454,9 +459,22 @@ pub fn installed_for(manager: ServiceManager, paths: &Paths) -> bool {
 pub fn status(manager: ServiceManager, paths: &Paths) -> ServiceStatus {
     let unit = user_unit_path(manager);
     let installed = installed_for(manager, paths);
+    // Ask the manager only about a unit of ours, so a machine without
+    // one runs no system tool.
+    let loaded = installed && loaded(manager);
     let detail = match (&unit, installed) {
         (None, _) => "service_manager is none, so no unit starts the host".to_owned(),
-        (Some(path), true) => format!("{UNIT} unit at {}", path.display()),
+        (Some(path), true) if loaded => format!("{UNIT} unit at {}", path.display()),
+        (Some(path), true) => format!(
+            "{UNIT} unit at {}, but {} has not loaded it, so it starts no host; `kersh service \
+             install` loads it",
+            path.display(),
+            if manager == ServiceManager::Systemd {
+                "systemd"
+            } else {
+                "launchd"
+            }
+        ),
         (Some(path), false) if path.exists() => format!(
             "{} runs a host for another state directory than {}",
             path.display(),
@@ -471,6 +489,7 @@ pub fn status(manager: ServiceManager, paths: &Paths) -> ServiceStatus {
         manager,
         unit,
         installed,
+        loaded,
         changed: false,
         detail,
     }
@@ -482,6 +501,25 @@ fn launchd_loaded() -> bool {
         &["print", &format!("{}/{UNIT}", launchd_domain())],
     )
     .is_ok()
+}
+
+/// Whether `manager` has the `kersh-host` unit: loaded in launchd, or
+/// enabled in systemd.
+fn loaded(manager: ServiceManager) -> bool {
+    match manager {
+        ServiceManager::Launchd => launchd_loaded(),
+        ServiceManager::Systemd => call(
+            &systemctl(),
+            &[
+                "--user",
+                "is-enabled",
+                "--quiet",
+                &format!("{UNIT}.service"),
+            ],
+        )
+        .is_ok(),
+        ServiceManager::None => false,
+    }
 }
 
 /// Write the `kersh-host` unit for `paths` and load it, so the host runs
@@ -544,6 +582,7 @@ pub fn install(manager: ServiceManager, paths: &Paths) -> Result<ServiceStatus, 
         manager,
         unit: Some(path.clone()),
         installed: true,
+        loaded: true,
         changed,
         detail: format!(
             "{UNIT} unit {} at {}; it starts the host at login",
@@ -562,6 +601,7 @@ pub fn stop(manager: ServiceManager) -> Result<ServiceStatus, String> {
             manager,
             unit: None,
             installed: false,
+            loaded: false,
             changed: false,
             detail: "service_manager is none, so no unit runs".to_owned(),
         });
@@ -599,6 +639,7 @@ pub fn stop(manager: ServiceManager) -> Result<ServiceStatus, String> {
         manager,
         unit: Some(path.clone()),
         installed: false,
+        loaded: false,
         changed,
         detail: if changed {
             format!("{UNIT} unit stopped and removed from {}", path.display())

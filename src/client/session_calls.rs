@@ -169,9 +169,22 @@ impl Client {
         }
         crate::paths::private_dir(&self.paths.state).map_err(failed)?;
         let manager = config.service_manager();
-        if crate::service::installed_for(manager, &self.paths) {
-            crate::service::start_unit(manager).map_err(SessionError::failed)?;
-        } else {
+        // An installed unit that does not start (launchd or systemd has
+        // not loaded it) falls back to a one-shot host. host.lock keeps a
+        // second host from running if the unit starts one later.
+        let unit_started = crate::service::installed_for(manager, &self.paths)
+            && match crate::service::start_unit(manager) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "kersh: the {} unit did not start ({error}); starting a one-shot host \
+                         instead. `kersh service install` reloads the unit.",
+                        crate::service::UNIT
+                    );
+                    false
+                }
+            };
+        if !unit_started {
             crate::service::spawn(
                 manager,
                 &crate::host::label(&self.paths, "host"),
