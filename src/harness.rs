@@ -481,6 +481,33 @@ mod tests {
     }
 
     #[test]
+    fn every_denied_codex_key_is_refused_however_it_is_written() {
+        for flags in [
+            vec!["-c", "model_instructions_file=/x"],
+            vec!["--config", "developer_instructions=x"],
+            vec!["-c", " hooks.PreToolUse=[]"],
+            vec!["-c", "features"],
+        ] {
+            let error = check_flags(Harness::Codex, &strings(&flags)).unwrap_err();
+            assert!(error.contains("is refused"), "{flags:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_flag_without_a_value_refuses_an_inline_one() {
+        let error = check_flags(Harness::Codex, &strings(&["--search=x"])).unwrap_err();
+        assert_eq!(error, "`--search` takes no value");
+    }
+
+    #[test]
+    fn rig_takes_no_harness_flags() {
+        let error =
+            check_flags(Harness::Rig, &strings(&["--permission-mode", "plan"])).unwrap_err();
+        assert!(error.contains("rig takes no harness flags"), "{error}");
+        check_flags(Harness::Rig, &[]).unwrap();
+    }
+
+    #[test]
     fn allowed_flags_pass_with_their_values() {
         check_flags(
             Harness::ClaudeCode,

@@ -733,6 +733,223 @@ fn the_group_limit_lets_one_of_two_concurrent_starts_take_the_last_place() {
 }
 
 #[test]
+fn many_concurrent_starts_take_exactly_the_free_places() {
+    let env = std::sync::Arc::new(Env::new());
+    let start = ["start", "--harness", "claude-code", "--group", "g"];
+    let output = env.kersh_in(
+        &[&start[..], &["--max-running", "3", "--prompt-file", "-"]].concat(),
+        "wait",
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+    let handles: Vec<_> = (0..12)
+        .map(|_| {
+            let env = std::sync::Arc::clone(&env);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                env.kersh_in(&[&start[..], &["--prompt-file", "-"]].concat(), "wait")
+                    .status
+                    .code()
+            })
+        })
+        .collect();
+    let codes: Vec<Option<i32>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let started = codes.iter().filter(|code| **code == Some(0)).count();
+    let refused = codes.iter().filter(|code| **code == Some(3)).count();
+    assert_eq!((started, refused), (2, 10), "{codes:?}");
+}
+
+#[test]
+fn the_group_limit_counts_only_running_sessions_of_its_own_group() {
+    let env = Env::new();
+    let group = |name: &str, prompt: &str, extra: &[&str]| {
+        let mut args = vec!["start", "--harness", "claude-code", "--group", name];
+        args.extend_from_slice(extra);
+        args.extend(["--prompt-file", "-"]);
+        env.kersh_in(&args, prompt)
+    };
+    // A held session of the group, and running sessions outside it.
+    let output = group("g", "exit3", &["--max-running", "1"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let held = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    env.wait_state(&held, "held");
+    let ungrouped = env.start(&["--harness", "claude-code"], "wait");
+    env.wait_state(&ungrouped, "running");
+    let output = group("other", "wait", &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let output = group("g", "wait", &[]);
+    assert!(
+        output.status.success(),
+        "neither a held session nor another group's takes g's place: {}",
+        stderr(&output)
+    );
+    let running = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    env.wait(&running, "the harness pid", |r| r["harness_pid"].is_i64());
+    assert_eq!(group("g", "wait", &[]).status.code(), Some(3));
+
+    // A running session's restart keeps its own place; a held session's
+    // restart needs a free one.
+    let output = env.kersh(&["restart", &running]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = env.kersh(&["restart", &held]);
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert!(stderr(&output).contains("1 of 1"), "{}", stderr(&output));
+
+    let output = group("a/b", "wait", &[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not a valid group name"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_harness_killed_by_a_signal_kersh_did_not_send_is_left_running_for_restore() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    let record = env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    kill(
+        i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap(),
+        "KILL",
+    );
+    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
+    assert_eq!(
+        record["reason"],
+        "killed by signal 9; left running for restore"
+    );
+    assert_eq!(record["state"], "running");
+}
+
+#[test]
+fn a_harness_that_cannot_start_holds_the_pane_with_the_cause() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    assert!(env.kersh(&["stop", &id]).status.success());
+    // The relaunch runs the recorded build, which is now gone.
+    std::fs::remove_file(env.bin().join("claude")).unwrap();
+    let output = env.kersh_in(&["resume", &id, "--prompt-file", "-"], "wait");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let record = env.wait_state(&id, "held");
+    let reason = record["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("could not start the harness: "),
+        "{reason}"
+    );
+    assert_eq!(record["exit_status"], Value::Null);
+}
+
+#[test]
+fn sigterm_to_a_headless_wrapper_leaves_the_record_running_and_stops_the_harness() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "hang");
+    let record = env.wait(&id, "the pids", |r| {
+        r["wrapper_pid"].is_i64() && r["harness_pid"].is_i64()
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while events(&env, &id, 0).is_empty() {
+        assert!(Instant::now() < deadline, "no init event");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let harness = i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap();
+    kill(
+        i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
+        "TERM",
+    );
+    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
+    assert_eq!(record["reason"], "SIGTERM; left running for restore");
+    assert_eq!(record["state"], "running");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(harness) {
+        assert!(
+            Instant::now() < deadline,
+            "the harness outlived its wrapper"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Send one request line to the host and parse its answer.
+fn ask_host(env: &Env, request: &Value) -> Result<Value, kersh::session::SessionError> {
+    use std::io::{BufRead as _, Write as _};
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(env.state().join("host.sock")).unwrap();
+    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(stream)
+        .read_line(&mut line)
+        .unwrap();
+    kersh::proto::parse_response(&line)
+}
+
+#[test]
+fn the_host_refuses_a_bad_request_from_a_client_that_skips_the_cli() {
+    let env = Env::new();
+    // Any write starts the host.
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.wait_state(&id, "running");
+
+    let start = |flags: &[&str], group: Option<&str>, max: Option<u32>| {
+        serde_json::json!({
+            "schema": kersh::proto::PROTOCOL_SCHEMA,
+            "version": "test",
+            "op": "start",
+            "settings": {
+                "harness": "claude-code",
+                "mode": "interactive",
+                "model": null,
+                "environment": "local",
+                "profile": null,
+                "resume_prompt": null,
+                "tempdir": false,
+                "env": {},
+            },
+            "flags": flags,
+            "agent": null,
+            "runtime_name": null,
+            "system_text": null,
+            "cwd": env.work(),
+            "labels": {},
+            "group": group,
+            "max_running": max,
+            "name": null,
+            "prompt": "wait",
+            "resume_conversation": null,
+            "size": null,
+        })
+    };
+    // The request is well formed: with nothing wrong in it, it starts.
+    let record = ask_host(&env, &start(&[], None, None)).unwrap();
+    assert_eq!(record["state"], "running");
+
+    let error = ask_host(&env, &start(&["--bare"], None, None)).unwrap_err();
+    assert!(
+        matches!(&error, kersh::session::SessionError::Usage { message } if message.contains("`--bare`")),
+        "{error:?}"
+    );
+    let error = ask_host(&env, &start(&[], None, Some(1))).unwrap_err();
+    assert!(
+        matches!(&error, kersh::session::SessionError::Usage { message } if message.contains("needs --group")),
+        "{error:?}"
+    );
+    let error = ask_host(
+        &env,
+        &serde_json::json!({"schema": 99, "version": "9.9.9", "op": "ping"}),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            kersh::session::SessionError::Schema { found: 99, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn a_record_of_a_newer_schema_is_refused() {
     let env = Env::new();
     let dir = env.state().join("sessions").join("future");

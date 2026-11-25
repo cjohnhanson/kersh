@@ -513,6 +513,37 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_event_cut_before_its_newline_is_skipped_and_its_number_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        {
+            let mut writer = Writer::open(&path).unwrap();
+            writer.append(parse_stderr("one")).unwrap();
+        }
+        // The crash cut only the newline: the line parses, but it was
+        // never a complete write.
+        let cut = parse_stderr("lost").into_event(2, "x".to_owned());
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&serde_json::to_vec(&cut).unwrap()).unwrap();
+        drop(file);
+
+        assert_eq!(
+            read(&path, 0).unwrap().len(),
+            1,
+            "a reader never sees an event the next writer drops"
+        );
+        let mut writer = Writer::open(&path).unwrap();
+        assert_eq!(writer.next_seq(), 2, "the cut event's number is reused");
+        writer.append(parse_stderr("two")).unwrap();
+        let all = read(&path, 0).unwrap();
+        assert_eq!(all.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(all[1].raw, Value::String("two".to_owned()));
+    }
+
+    #[test]
     fn claude_init_is_found_by_type_after_hook_events() {
         let hook = parse_stdout(
             Harness::ClaudeCode,
