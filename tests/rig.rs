@@ -19,6 +19,14 @@ const TOOL_THEN_TEXT: &str = r#"[{"kind":"tool","name":"bash","args":{"command":
 /// A tool call that runs for a while, so the session stays running.
 const SLOW: &str = r#"[{"kind":"tool","name":"bash","args":{"command":"sleep 25"}},{"kind":"text","text":"late"}]"#;
 
+/// Wait until a rig session runs its harness. Rig writes no fake-harness
+/// log, so `Env::running_with_pid`, which waits for one, does not apply.
+fn running_rig(env: &Env, id: &str) -> Value {
+    env.wait(id, "a running rig harness", |r| {
+        r["state"] == "running" && r["harness_pid"].is_i64()
+    })
+}
+
 fn write_agent(root: &Path, name: &str, extra: &str) {
     std::fs::write(root.join("kersh.yml"), "").unwrap();
     let dir = root.join("agents").join(name);
@@ -353,7 +361,7 @@ fn a_group_limit_applies_to_rig_starts() {
     let env = Env::new();
     rig_agent(&env, "slow", Some(SLOW));
     let first = env.start(&["slow", "--group", "g", "--max-running", "1"], "go");
-    env.running_with_pid(&first);
+    running_rig(&env, &first);
     let output = env.kersh_in(
         &["start", "slow", "--group", "g", "--prompt-file", "-"],
         "go",
@@ -389,7 +397,7 @@ fn restore_holds_a_rig_session_with_ret_run_again() {
     let env = Env::new();
     rig_agent(&env, "slow", Some(SLOW));
     let id = env.start(&["slow"], "go");
-    env.running_with_pid(&id);
+    running_rig(&env, &id);
 
     env.stop_host();
     env.kill_mux_hard();
