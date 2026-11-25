@@ -31,9 +31,12 @@ pub const CODEX_STREAM: &str = include_str!("../fixtures/codex-stream.jsonl");
 /// Interactive, the last argument decides: `exit0`, `exit3`, `exitlater`
 /// to exit 0 after four seconds, `survivor` to leave a child in its
 /// process group that ignores HUP and TERM (its pid in
-/// `$HOME/fakelog/<session>.survivor`) and wait, or anything else to wait.
-/// Each log file is written whole to a temp name and moved into place, so
-/// a test that polls for it never reads a part of it.
+/// `$HOME/fakelog/<session>.survivor`) and wait, `hupsurvivor` to do the
+/// same and ignore HUP itself, or anything else to wait. Each log file is
+/// written whole to a temp name and moved into place, so a test that polls
+/// for it never reads a part of it. The `.args` file comes last, after the
+/// transcript and the survivor: once it exists, the launch has set up all
+/// it leaves on disk.
 pub const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
   if [ -f "$HOME/claude-version" ]; then cat "$HOME/claude-version"; else echo "2.1.999 (Claude Code)"; fi
@@ -42,7 +45,6 @@ fi
 put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" | put "$log.args"
 env | put "$log.env"
 headless=0; sid=""; prev=""; last=""
 for a in "$@"; do
@@ -56,10 +58,12 @@ transcript() {
     : >> "$HOME/.claude/projects/-w/$sid.jsonl"
   fi
 }
+args() { printf '%s\n' "$@" | put "$log.args"; }
 if [ "$headless" = 1 ]; then
   prompt=$(cat)
   printf '%s' "$prompt" | put "$log.stdin"
   case "$prompt" in *notranscript*) ;; *) transcript ;; esac
+  args "$@"
   case "$prompt" in
     hang*) echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'; exec sleep 600 ;;
   esac
@@ -67,14 +71,19 @@ if [ "$headless" = 1 ]; then
   exit 0
 fi
 case "$last" in *notranscript*) ;; *) transcript ;; esac
+survivor() {
+  ( trap '' HUP TERM; exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+  echo "$!" | put "$HOME/fakelog/$KERSH_SESSION.survivor"
+}
+case "$last" in
+  survivor) survivor ;;
+  hupsurvivor) survivor; trap '' HUP ;;
+esac
+args "$@"
 case "$last" in
   exit0) echo "fake claude says hi"; sleep 1; exit 0 ;;
   exit3) echo "fake claude fails"; exit 3 ;;
   exitlater) echo "fake claude exits soon"; sleep 4; exit 0 ;;
-  survivor)
-    ( trap '' HUP TERM; exec sleep 600 ) </dev/null >/dev/null 2>&1 &
-    echo "$!" | put "$HOME/fakelog/$KERSH_SESSION.survivor"
-    echo "fake claude waiting"; exec sleep 600 ;;
   *) echo "fake claude waiting"; exec sleep 600 ;;
 esac
 "#;
@@ -86,15 +95,16 @@ if [ "$1" = "--version" ]; then echo "codex-cli 0.999.0"; exit 0; fi
 put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" | put "$log.args"
 if [ "$1" = "exec" ]; then
   put "$log.stdin"
+  printf '%s\n' "$@" | put "$log.args"
   cat "$HOME/codex-stream.jsonl"
   exit 0
 fi
 d="$HOME/.codex/sessions/2026/11/24"
 mkdir -p "$d"
 exec 3>>"$d/rollout-2026-11-24T10-00-00-0199bbbb-cccc-7ddd-8eee-ffff00001111.jsonl"
+printf '%s\n' "$@" | put "$log.args"
 echo "fake codex waiting"
 exec sleep 600
 "#;
@@ -275,10 +285,26 @@ impl Env {
         })
     }
 
+    /// Wait for a running harness that has logged its launch: the fake
+    /// writes `.args` after its transcript, rollout, and survivor, so a
+    /// crash after this finds them on disk.
     pub fn running_with_pid(&self, id: &str) -> Value {
-        self.wait(id, "a running harness", |r| {
-            r["state"] == "running" && r["harness_pid"].is_i64()
-        })
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let record = self.wait(id, "a running harness", |r| {
+                r["state"] == "running" && r["harness_pid"].is_i64()
+            });
+            let pid = record["harness_pid"].as_i64().unwrap();
+            let args = self.home().join("fakelog").join(format!("{id}.{pid}.args"));
+            if args.is_file() {
+                return record;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "harness {pid} of {id} never logged its args"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Every argument list the fake harnesses logged for `id`, oldest

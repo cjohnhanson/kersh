@@ -313,6 +313,10 @@ pub struct Record {
     pub labels: BTreeMap<String, String>,
     pub group: Option<String>,
     pub pgid: Option<i32>,
+    /// The launch whose wrapper reported `pgid`. Absent, an earlier
+    /// launch's.
+    #[serde(default)]
+    pub pgid_launch: Option<u32>,
     pub boot_id: Option<String>,
     pub wrapper_pid: Option<i32>,
     pub harness_pid: Option<i32>,

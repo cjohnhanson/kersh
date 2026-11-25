@@ -231,10 +231,11 @@ fn fold_note(current: &mut Record, note: Note) {
     }
     current.wrapper_pid = Some(note.wrapper_pid);
     current.harness_pid = note.harness_pid;
-    // A held pane runs no harness; the old group stays recorded until
-    // it is seen empty.
+    // A held pane runs no harness; the old group stays recorded, with
+    // the launch that reported it, until it is seen empty.
     if note.pgid.is_some() {
         current.pgid = note.pgid;
+        current.pgid_launch = Some(note.launch);
     }
     if note.boot_id.is_some() {
         current.boot_id = note.boot_id;
@@ -680,6 +681,7 @@ impl Host {
             labels: launch.labels.clone(),
             group: launch.group.clone(),
             pgid: None,
+            pgid_launch: None,
             boot_id: crate::service::boot_id(),
             wrapper_pid: None,
             harness_pid: None,
@@ -931,7 +933,7 @@ impl Host {
         if let Some(pgid) = current
             && !restoring::group_empties(pgid).await
         {
-            return Err(restoring::old_group_runs(pgid));
+            return Err(restoring::group_outlives_pane(id, pgid));
         }
         self.launch_again(mux, &mut record, restoring::How::Resume { prompt }, None)
             .await?;
@@ -1259,6 +1261,7 @@ mod tests {
             labels: BTreeMap::new(),
             group: group.map(str::to_owned),
             pgid: None,
+            pgid_launch: None,
             boot_id: None,
             wrapper_pid: None,
             harness_pid: None,
@@ -1450,20 +1453,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restart_waits_for_the_old_group_to_empty() {
+    async fn a_restart_waits_for_its_group_and_refuses_one_that_stays() {
         let tmp = tempfile::tempdir().unwrap();
         let host = host(tmp.path());
+        let fake = Fake::default();
+
+        // A group that empties within the wait: the restart goes on.
         let (mut child, pgid) = own_group("/bin/sleep", &["1"]);
         let reaper = std::thread::spawn(move || child.wait());
         let mut running = record("a", State::Running, None, &conversation_id());
         running.pgid = Some(pgid);
         running.boot_id = crate::service::boot_id();
         put(&host, &running);
-        let fake = Fake::default();
         let restarted = host.restart_on(&fake, "a").await;
         let _ = reaper.join();
         let restarted = restarted.unwrap();
         assert_eq!((restarted.state, restarted.launches), (State::Running, 2));
+
+        // A group that outlives the wait: refused after the pane ended,
+        // naming the restore that then holds the session.
+        let (child, pgid) = own_group("/bin/sleep", &["60"]);
+        let mut running = record("b", State::Running, None, &conversation_id());
+        running.pgid = Some(pgid);
+        running.boot_id = crate::service::boot_id();
+        put(&host, &running);
+        let result = host.restart_on(&fake, "b").await;
+        end_group(child, pgid);
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("kill -- -{pgid}")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("restore holds"), "{error}");
+        assert!(fake.killed.lock().unwrap().contains(&"kersh-b".to_owned()));
+        assert_eq!(host.load("b").unwrap(), running);
     }
 
     #[test]

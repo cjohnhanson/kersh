@@ -343,6 +343,42 @@ fn a_process_left_in_the_old_group_holds_the_session_and_refuses_ret_and_resume(
 }
 
 #[test]
+fn a_restore_while_the_dead_pane_s_wrapper_still_runs_waits_on_the_group() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "hupsurvivor");
+    let before = env.running_with_pid(&id);
+    let survivor = env.survivor(&id);
+    let pgid = before["pgid"].as_i64().unwrap();
+
+    // The harness ignores the hang-up, so its wrapper outlives the pane
+    // for a while; the watcher restores inside that time.
+    env.kill_mux_hard();
+
+    let record = env.wait_restored(&id, 1, "held");
+    assert!(alive(survivor), "the survivor outlived the server");
+    assert_eq!(record["pgid"].as_i64(), Some(pgid), "{record:#}");
+    let reason = record["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(&format!("process group {pgid}")),
+        "{reason}"
+    );
+    assert_eq!(
+        env.launches(&id).len(),
+        1,
+        "nothing ran beside the survivor"
+    );
+
+    let output = env.kersh(&["resume", &id]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("kill -- -{pgid}")),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(env.launches(&id).len(), 1, "no launch beside the survivor");
+}
+
+#[test]
 fn a_session_that_exits_while_the_host_is_stopped_stays_ended() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code"], "exitlater");
