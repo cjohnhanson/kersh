@@ -173,16 +173,15 @@ impl Client {
         // it, or systemd refuses it) falls back to a one-shot host. A
         // systemd unit that is only not enabled still starts here.
         // host.lock keeps a second host from running if the unit starts
-        // one later.
+        // one later. Without a systemd user manager no one-shot host can
+        // start either, so the client says that once and stops.
         let unit_started = crate::service::installed_for(manager, &self.paths)
             && match crate::service::start_unit(manager) {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!(
-                        "kersh: the {} unit did not start ({error}); starting a one-shot host \
-                         instead. `kersh service install` reloads the unit.",
-                        crate::service::UNIT
-                    );
+                    let note = crate::service::unit_start_failed(manager, &error)
+                        .map_err(SessionError::failed)?;
+                    eprintln!("kersh: {note}");
                     false
                 }
             };
