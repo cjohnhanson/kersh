@@ -8,7 +8,6 @@
 //! here authenticates, because only this user's processes reach it.
 
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -63,9 +62,44 @@ use crate::session::{HarnessBuild, Record, Screen, SessionError, StartRequest, S
         runtimes,
         runtime,
     ),
-    components(schemas(SessionError, Record, StartRequest, Launch, Event, Screen))
+    components(schemas(SessionError, Record, StartRequest, Launch, Event, Screen)),
+    modifiers(&SchemaRefusal)
 )]
 pub struct ApiDoc;
+
+/// The 400 every route can answer: the schema check runs before each
+/// handler.
+struct SchemaRefusal;
+
+impl utoipa::Modify for SchemaRefusal {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{Content, Ref, ResponseBuilder};
+        let refused = ResponseBuilder::new()
+            .description("A bad request, or a request of another `kersh-schema`.")
+            .content(
+                "application/json",
+                Content::new(Some(Ref::from_schema_name("SessionError"))),
+            )
+            .build();
+        for item in openapi.paths.paths.values_mut() {
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                operation
+                    .responses
+                    .responses
+                    .insert("400".to_owned(), refused.clone().into());
+            }
+        }
+    }
+}
 
 /// The document as JSON, as `GET /openapi.json` serves it.
 #[must_use]
@@ -293,7 +327,8 @@ async fn list_sessions(
     responses(
         (status = 201, body = Record),
         (status = 400, body = SessionError),
-        (status = 409, body = SessionError, description = "the group is at its limit")
+        (status = 409, body = SessionError, description = "the group is at its limit"),
+        (status = 500, body = SessionError, description = "the session did not start")
     )
 )]
 async fn start_session(State(host): State<Shared>, bytes: Bytes) -> Answer {
@@ -331,7 +366,8 @@ async fn start_session(State(host): State<Shared>, bytes: Bytes) -> Answer {
     responses(
         (status = 201, body = Record),
         (status = 400, body = SessionError),
-        (status = 409, body = SessionError, description = "the group is at its limit")
+        (status = 409, body = SessionError, description = "the group is at its limit"),
+        (status = 500, body = SessionError, description = "the session did not start")
     )
 )]
 async fn launch(State(host): State<Shared>, bytes: Bytes) -> Answer {
@@ -491,6 +527,18 @@ async fn capture(State(host): State<Shared>, Path(id): Path<String>) -> Answer {
     no_content()
 }
 
+/// The records a change stream sends, read off the async workers. A
+/// record that does not read is logged and skipped, as on the host's
+/// background paths.
+async fn readable_records(host: Shared) -> Vec<Record> {
+    tokio::task::spawn_blocking(move || host.background_records())
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("kersh host: /v1/changes could not read the records: {error}");
+            Vec::new()
+        })
+}
+
 /// Every record, then each change, one JSON object per line, until the
 /// client hangs up: `kersh ps --follow --json`.
 #[utoipa::path(
@@ -501,22 +549,22 @@ async fn capture(State(host): State<Shared>, Path(id): Path<String>) -> Answer {
 async fn changes(State(host): State<Shared>) -> Response {
     // Subscribe before reading the records, so no change falls between.
     let receiver = host.changes.subscribe();
-    let sessions: PathBuf = host.paths.sessions();
-    let all = move || crate::session::read_records(&sessions).unwrap_or_default();
-    let first = all();
+    let first = readable_records(Arc::clone(&host)).await;
     let stream = futures_util::stream::unfold(
-        (first.into_iter(), receiver, all),
-        |(mut pending, mut receiver, all)| async move {
+        (first.into_iter(), receiver, host),
+        |(mut pending, mut receiver, host)| async move {
             loop {
                 if let Some(record) = pending.next() {
                     let mut line = serde_json::to_vec(&record).unwrap_or_default();
                     line.push(b'\n');
-                    return Some((Ok::<_, Infallible>(line), (pending, receiver, all)));
+                    return Some((Ok::<_, Infallible>(line), (pending, receiver, host)));
                 }
                 match receiver.recv().await {
                     Ok(record) => pending = vec![record].into_iter(),
                     // Too far behind: every record again, as at the start.
-                    Err(broadcast::error::RecvError::Lagged(_)) => pending = all().into_iter(),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        pending = readable_records(Arc::clone(&host)).await.into_iter();
+                    }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }

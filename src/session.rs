@@ -352,9 +352,10 @@ pub struct Record {
 
 /// What `kersh start` and [`crate::Client::start`] take. Everything but
 /// the harness is optional; an agent file and runtimes fill the rest.
-/// Every field may be left out of its JSON.
+/// Every field may be left out of its JSON; a field it does not name is
+/// refused, so a misspelled limit cannot be dropped in silence.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StartRequest {
     /// An agent file name. Without one, `harness` is required.
     pub agent: Option<String>,
@@ -369,7 +370,9 @@ pub struct StartRequest {
     /// Added to the agent's body for this session.
     #[schema(value_type = Option<String>)]
     pub instructions_file: Option<PathBuf>,
-    /// The working directory; the caller's when absent.
+    /// The working directory. `POST /v1/sessions` requires it, as an
+    /// absolute path; `kersh start`, `kersh serve`, and `kersh::Client`
+    /// use the caller's directory when it is absent.
     #[schema(value_type = Option<String>)]
     pub cwd: Option<PathBuf>,
     pub tempdir: bool,

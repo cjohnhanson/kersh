@@ -9,10 +9,16 @@
 //!
 //! Every request and response names the protocol schema and the
 //! sender's kersh version in the `kersh-schema` and `kersh-version`
-//! headers. The host refuses a request of another schema, and the client
-//! refuses a response of another one, each naming both versions, so two
-//! builds never act on messages they may not understand. A request
-//! without the headers, from a shell, is taken as this build's.
+//! headers. The host refuses a request of another schema with a 400 that
+//! names both versions. A request without the headers, from a shell, is
+//! taken as this build's. The client refuses a response without this
+//! build's schema header.
+//!
+//! Before it sends anything, the client reads the schema in `host.lock`.
+//! A running host of another schema is refused there, with both
+//! versions and the host's pid to stop. This catches a schema 1 host,
+//! which reads JSON lines and cannot answer HTTP. A schema 1 client gets
+//! only the 400 of an HTTP host, a reply it cannot read.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

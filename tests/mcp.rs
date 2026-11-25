@@ -223,6 +223,39 @@ fn ps_and_start_answer_what_the_commands_print() {
 }
 
 #[test]
+fn start_refuses_an_unknown_field() {
+    let env = Env::new();
+    let mut server = Server::start(&env);
+    server.initialize();
+    let (text, error) = server.call(
+        "kersh_start",
+        json!({
+            "harness": "claude-code",
+            "cwd": env.work().display().to_string(),
+            "group": "acme",
+            "max_runing": 1
+        }),
+    );
+    assert!(error, "{text}");
+    assert!(text.contains("max_runing"), "{text}");
+    assert!(env.host_pid().is_none(), "the start went ahead");
+}
+
+#[test]
+fn setup_reports_an_error_when_a_piece_is_missing() {
+    // No gaff is on the test PATH, so `gaff init` cannot run.
+    let env = Env::new();
+    let mut server = Server::start(&env);
+    server.initialize();
+    let (text, error) = server.call("kersh_setup", json!({"harness": "claude-code"}));
+    assert!(error, "{text}");
+    assert!(text.contains("not fully wired"), "{text}");
+    let first: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(first["piece"], "gaff init", "{text}");
+    assert_eq!(first["present"], false, "{text}");
+}
+
+#[test]
 fn reads_match_the_cli() {
     let env = Env::new();
     std::fs::write(

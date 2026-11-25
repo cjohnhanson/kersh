@@ -38,8 +38,19 @@ Sessions (rig, Claude Code, and Codex, hosted in a terminal session):
   kersh send <id> --prompt-file <path|->
   kersh stop|resume|restart|rm <id>
   kersh stop $KERSH_SESSION  (an agent ends its own session when its task is done)
+";
+
+/// The primer's last lines: the front ends this build has.
+#[cfg(feature = "tui")]
+const FRONT_ENDS: &str = "\
 Front ends over the same calls: kersh serve (MCP on stdio), kersh tui, and REST
 on the host's socket, host.sock (GET /openapi.json describes it).
+";
+
+#[cfg(not(feature = "tui"))]
+const FRONT_ENDS: &str = "\
+Front ends over the same calls: kersh serve (MCP on stdio), and REST on the
+host's socket, host.sock (GET /openapi.json describes it).
 ";
 
 const DOCS: &str = include_str!("../docs/kersh.md");
@@ -484,7 +495,7 @@ fn dispatch(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Prime => {
-            print!("{PRIME}");
+            print!("{PRIME}{FRONT_ENDS}");
             ExitCode::SUCCESS
         }
         command => command_into(command).map_or(ExitCode::FAILURE, crate::cli_sessions::dispatch),
@@ -1245,5 +1256,12 @@ mod tests {
     fn docs_and_prime_succeed() {
         assert_eq!(main(args(&["docs"])), ExitCode::SUCCESS);
         assert_eq!(main(args(&["prime"])), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn the_primer_names_the_tui_only_in_a_build_with_it() {
+        let text = format!("{PRIME}{FRONT_ENDS}");
+        assert_eq!(text.contains("kersh tui"), cfg!(feature = "tui"), "{text}");
+        assert!(text.contains("kersh serve"), "{text}");
     }
 }

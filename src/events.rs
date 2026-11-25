@@ -69,7 +69,7 @@ pub struct Event {
     pub conversation: Option<String>,
     /// The harness's line: its JSON, or the text of a line that is not
     /// JSON.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Value)]
     pub raw: Value,
 }
 

@@ -124,9 +124,38 @@ impl Client {
         &self.paths
     }
 
+    /// Refuse a running host of another protocol schema before anything
+    /// is sent to it. A schema 1 host reads JSON lines and cannot answer
+    /// HTTP, so its `host.lock` is the only place its schema shows.
+    fn same_schema_host(&self) -> Result<(), SessionError> {
+        let Some(lock) = crate::host::read_lock(&self.paths) else {
+            return Ok(());
+        };
+        if lock.schema == proto::PROTOCOL_SCHEMA {
+            return Ok(());
+        }
+        let auto_start = Config::load(&self.paths).map_or(true, |config| config.auto_start());
+        let then = if auto_start {
+            "the next kersh command starts a host of this build"
+        } else {
+            "`kersh host` starts a host of this build"
+        };
+        Err(SessionError::failed(format!(
+            "the running host is kersh {} (pid {}) and speaks protocol schema {}, but this \
+             kersh {} speaks schema {}; stop the old host with `kill {}`, and {then}",
+            lock.version,
+            lock.pid,
+            lock.schema,
+            proto::VERSION,
+            proto::PROTOCOL_SCHEMA,
+            lock.pid
+        )))
+    }
+
     fn connect_host(&self, start: bool) -> Result<UnixStream, SessionError> {
         let socket = self.paths.host_sock();
         if let Ok(stream) = UnixStream::connect(&socket) {
+            self.same_schema_host()?;
             return Ok(stream);
         }
         if !start {
@@ -457,7 +486,9 @@ impl Client {
             crate::mux::attach(&self.paths, &record.rmux_session).map_err(SessionError::failed);
         // A detach is one of the times the screen is captured, for a
         // restore to print above the agent. Only a running host does it.
-        if self.connect_host(false).is_ok() {
+        if let Ok(id) = segment(id)
+            && self.connect_host(false).is_ok()
+        {
             let _ = self.call(Method::POST, &format!("/v1/sessions/{id}/capture"));
         }
         result
@@ -525,7 +556,11 @@ impl Client {
         self.runtime_list()?
             .into_iter()
             .find(|entry| entry.name == name)
-            .ok_or_else(|| SessionError::usage(format!("no runtime `{name}` in runtimes.yml")))
+            .ok_or_else(|| {
+                SessionError::usage(format!(
+                    "no runtime `{name}` in runtimes.yml; `kersh runtime list` lists them"
+                ))
+            })
     }
 
     /// Run gaff's registration for `harness` and check each piece of its
@@ -541,5 +576,33 @@ impl Client {
         let config = Config::load(&self.paths).map_err(SessionError::failed)?;
         let root = root.map(Path::to_path_buf).or(config.memory.root);
         crate::memories::generate(root.as_deref()).map_err(SessionError::failed)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_id_that_is_not_one_safe_segment_is_refused() {
+        assert_eq!(segment("acme-1").unwrap(), "acme-1");
+        for id in ["", "a/b", "../mux/restart", "a?b", "a b", "a%2Fb"] {
+            assert!(
+                matches!(segment(id), Err(SessionError::NotFound { .. })),
+                "{id:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_runtime_points_to_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::discover(dir.path()).with_paths(Paths::new(
+            dir.path().join("state"),
+            dir.path().join("config"),
+        ));
+        let error = client.runtime_show("nosuch").unwrap_err().to_string();
+        assert!(error.contains("`kersh runtime list`"), "{error}");
     }
 }
