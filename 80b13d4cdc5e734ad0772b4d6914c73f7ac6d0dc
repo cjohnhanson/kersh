@@ -1,0 +1,9 @@
+signoff[review-code] PASS 80b13d4 round-2 independent reader read read_lock, write_lock, host start order, connect_host, background_records and serve.rs argument types; host.lock schema check cannot refuse a healthy host (lock written under flock before bind); deny_unknown_fields matches the other argument types
+
+signoff[review-tests] PASS 80b13d4 nine round-1 fixes mutated red (same_schema_host, deny_unknown_fields, schema-header refusal, absolute cwd, kersh_setup isError, segment, OpenAPI 400s, /v1/changes records, primer tui); test.sh green, restore 18/18 twice, no-tui help 2/2
+
+signoff[review-docs] PASS 80b13d4 AGENTS.md, help snapshots (with and without tui), primer, proto.rs doc, StartRequest docs, MCP tool descriptions and error text match the runs
+
+signoff[review-deps] PASS 80b13d4 OSV batch query over Cargo.lock: only new advisories are heapless 0.8.0 via mdstore-core, gix, faster-hex, in code not compiled (alloc feature); new crates mainstream, MIT-compatible
+
+signoff[review-usability] PASS 80b13d4 cold runs: runtime show hint, start without arguments, bad ids, stale schema-1 lock recovers, MCP and REST unknown-field refusals name the field
