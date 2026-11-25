@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn an_unknown_argument_is_refused() {
-        let server = KershServer::new(Client::from_root(PathBuf::from("/nonexistent")));
+        let server = KershServer::new(Client::discover(std::path::Path::new("/nonexistent")));
         let error = server
             .call(
                 "kersh_stop",
