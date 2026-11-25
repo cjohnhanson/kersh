@@ -26,7 +26,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "fs", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "fs", "time", "net", "signal", "sync"] }
+# Safe wrappers over the few process and terminal calls the session host
+# and its wrapper need (setsid, kill, flock, the window size), so the
+# crate keeps `forbid(unsafe_code)`.
+rustix = { version = "1", features = ["fs", "process", "termios", "std"] }
+# Conversation ids handed to Claude Code at launch.
+uuid = { version = "1", features = ["v4"] }
 # The read tools: ripgrep as libraries, no shell and no honored config.
 ignore = "0.4"
 grep-searcher = "0.1"

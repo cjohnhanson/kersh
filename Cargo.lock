@@ -3278,12 +3278,14 @@ dependencies = [
  "rmux-proto",
  "rmux-sdk",
  "rmux-server",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

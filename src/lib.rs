@@ -16,11 +16,17 @@ pub mod agent;
 pub mod cli;
 pub mod client;
 pub mod compose;
+pub mod events;
 #[cfg(feature = "fake-model")]
 pub mod fake_model;
 pub mod gaff;
+pub mod harness;
 pub mod hook;
 pub mod model;
+pub mod paths;
+pub mod proto;
+pub mod runtime;
+pub mod session;
 pub mod sessions;
 pub mod skill;
 pub mod store;
