@@ -18,6 +18,7 @@ mod cli_sessions;
 pub mod client;
 pub mod compose;
 pub mod discover;
+pub mod doctor;
 pub mod events;
 #[cfg(feature = "fake-model")]
 pub mod fake_model;

@@ -59,10 +59,10 @@ fn item(piece: &str, present: bool, detail: impl Into<String>) -> SetupItem {
     }
 }
 
-fn gaff_config(env_home: &Path) -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| env_home.join(".config"), PathBuf::from)
+fn gaff_config(env: &[(String, String)], home: &Path) -> PathBuf {
+    env.iter()
+        .find(|(key, value)| key == "XDG_CONFIG_HOME" && !value.is_empty())
+        .map_or_else(|| home.join(".config"), |(_, value)| PathBuf::from(value))
         .join("gaff")
         .join("gaff.yml")
 }
@@ -82,22 +82,26 @@ fn names_in(config: &serde_yaml_ng::Value, key: &str) -> Vec<String> {
 }
 
 /// Run gaff's own registration, then check every piece.
-#[allow(clippy::too_many_lines)] // One block per checked piece.
 pub fn setup(harness: Harness, cwd: &Path) -> Result<SetupReport, String> {
     if harness == Harness::Rig {
         return Err("rig calls gaff itself; it needs no setup".to_owned());
     }
     let env: Vec<(String, String)> = std::env::vars().collect();
     let home = crate::store::user_home().unwrap_or_else(|| PathBuf::from("/"));
-    let mut items = Vec::new();
+    let mut items = vec![gaff_init(harness, cwd)];
+    items.extend(harness_items(harness, &env));
+    items.extend(carried(&env, &home));
+    Ok(SetupReport { harness, items })
+}
 
+fn gaff_init(harness: Harness, cwd: &Path) -> SetupItem {
     let init = std::process::Command::new("gaff")
         .args(["init", "--host", harness.as_str()])
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .output();
     match init {
-        Ok(output) if output.status.success() => items.push(item(
+        Ok(output) if output.status.success() => item(
             "gaff init",
             true,
             format!(
@@ -105,29 +109,31 @@ pub fn setup(harness: Harness, cwd: &Path) -> Result<SetupReport, String> {
                 cwd.display(),
                 String::from_utf8_lossy(&output.stdout).trim()
             ),
-        )),
-        Ok(output) => items.push(item(
+        ),
+        Ok(output) => item(
             "gaff init",
             false,
             format!(
                 "`gaff init --host {harness}` failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-        )),
-        Err(error) => items.push(item(
-            "gaff init",
-            false,
-            format!("cannot run gaff: {error}"),
-        )),
+        ),
+        Err(error) => item("gaff init", false, format!("cannot run gaff: {error}")),
     }
+}
 
-    let files = crate::guard::user_hook_files(harness, &env);
+/// The checks for one harness under `env`: gaff's user-level hooks, and
+/// for Claude Code its auto memory. They read files and write nothing.
+#[must_use]
+pub fn harness_items(harness: Harness, env: &[(String, String)]) -> Vec<SetupItem> {
+    let mut items = Vec::new();
+    let files = crate::guard::user_hook_files(harness, env);
     let shown = files
         .iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let registered = crate::guard::registered_for_user(harness, &env);
+    let registered = crate::guard::registered_for_user(harness, env);
     items.push(item(
         "user-level hooks",
         registered,
@@ -165,8 +171,16 @@ pub fn setup(harness: Harness, cwd: &Path) -> Result<SetupReport, String> {
             },
         ));
     }
+    items
+}
 
-    let config_path = gaff_config(&home);
+/// The carried eng.rip rules in gaff's user config under `env`: the
+/// sections, the guards, `transitions.agent_may_set`, and the tundish
+/// handler. They read files and write nothing.
+#[must_use]
+pub fn carried(env: &[(String, String)], home: &Path) -> Vec<SetupItem> {
+    let mut items = Vec::new();
+    let config_path = gaff_config(env, home);
     let config = std::fs::read_to_string(&config_path)
         .ok()
         .and_then(|text| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text).ok());
@@ -233,8 +247,7 @@ pub fn setup(harness: Harness, cwd: &Path) -> Result<SetupReport, String> {
             handlers.display()
         ),
     ));
-
-    Ok(SetupReport { harness, items })
+    items
 }
 
 #[cfg(test)]

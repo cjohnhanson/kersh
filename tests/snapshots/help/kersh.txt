@@ -25,6 +25,8 @@ Commands:
   agent     Write agent files into the user-level store
   runtime   Write, list, and show runtimes in runtimes.yml
   setup     Run gaff's registration for a harness and check its wiring. Exits 1 when a piece is missing
+  doctor    Check this machine for kersh. Exits 1 when a required piece is missing
+  service   Install or stop the kersh-host unit, which starts the host at login
   memories  Print the agent-memory block for a gaff section
   serve     Serve the session and agent commands over MCP on stdio
   tui       Browse and drive sessions in a terminal UI

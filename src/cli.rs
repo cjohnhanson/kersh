@@ -45,6 +45,9 @@ Sessions (rig, Claude Code, and Codex, hosted in a terminal session):
 const FRONT_ENDS: &str = "\
 Front ends over the same calls: kersh serve (MCP on stdio), kersh tui, and REST
 on the host's socket, host.sock (GET /openapi.json describes it).
+Machine:
+  kersh doctor [--json]        (what is installed, wired, and guarded)
+  kersh service install|stop   (the kersh-host unit that starts the host at login)
 ";
 
 #[cfg(not(feature = "tui"))]
@@ -236,6 +239,24 @@ enum Command {
         #[command(flatten)]
         json: JsonArg,
     },
+    /// Check this machine for kersh. Exits 1 when a required piece is
+    /// missing.
+    ///
+    /// Reports the harnesses, the host and session server, the kersh-host
+    /// unit, gaff and its hooks, the guard for each harness and mode, and
+    /// the eng.rip tools, against the login environment. Required: kersh
+    /// and gaff on the login PATH, gaff's hooks for each harness found,
+    /// and a running host or session server of this kersh's version.
+    Doctor {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Install or stop the kersh-host unit, which starts the host at
+    /// login.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Print the agent-memory block for a gaff section.
     Memories {
         /// The notes store; the configured memory.root by default.
@@ -375,6 +396,28 @@ struct StartArgs {
 enum HarnessCommand {
     /// The path and version of each harness on the login PATH.
     List {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Write the kersh-host unit and load it, so the host runs at login.
+    ///
+    /// The unit is a launchd agent with `service_manager: launchd` and a
+    /// systemd user unit with `service_manager: systemd`. The host runs
+    /// now and at every login, and restores lost sessions when it starts.
+    /// Running it again with the same unit changes nothing.
+    Install {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Stop the kersh-host unit and remove it. Sessions keep running.
+    ///
+    /// The unit is unloaded and its file removed, so the host no longer
+    /// starts at login. The session server and its agents keep running.
+    Stop {
         #[command(flatten)]
         json: JsonArg,
     },
@@ -605,6 +648,11 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
         Command::Setup { harness, json } => S::Setup {
             harness,
             json: json.json,
+        },
+        Command::Doctor { json } => S::Doctor { json: json.json },
+        Command::Service { command } => match command {
+            ServiceCommand::Install { json } => S::ServiceInstall { json: json.json },
+            ServiceCommand::Stop { json } => S::ServiceStop { json: json.json },
         },
         Command::Memories { root } => S::Memories { root },
         Command::Host { state } => S::Host { state },
