@@ -13,7 +13,6 @@ use serde::Serialize;
 
 use crate::client::{Client, ListEntry};
 use crate::session::{Harness, Mode, State};
-use crate::store::Stores;
 
 const PRIME: &str = "\
 # kersh
@@ -406,22 +405,26 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Init { name, root } => init(&name, root),
-        Command::List { root, json } => list(&client(root.root.as_deref()), json.json),
-        Command::Show { name, root, json } => show(&client(root.root.as_deref()), &name, json.json),
-        Command::Check { root, json } => check(&client(root.root.as_deref()), json.json),
+        Command::List { root, json } => with_client(root.root.as_deref(), |c| list(c, json.json)),
+        Command::Show { name, root, json } => {
+            with_client(root.root.as_deref(), |c| show(c, &name, json.json))
+        }
+        Command::Check { root, json } => with_client(root.root.as_deref(), |c| check(c, json.json)),
         Command::Render {
             name,
             context_file,
             root,
             json,
             prompt,
-        } => render(
-            &client(root.root.as_deref()),
-            &name,
-            context_file.as_deref(),
-            prompt.as_deref().unwrap_or_default(),
-            json.json,
-        ),
+        } => with_client(root.root.as_deref(), |c| {
+            render(
+                c,
+                &name,
+                context_file.as_deref(),
+                prompt.as_deref().unwrap_or_default(),
+                json.json,
+            )
+        }),
         Command::Run {
             name,
             context_file,
@@ -630,18 +633,20 @@ fn agent_template(name: &str) -> String {
     )
 }
 
-/// The stores for `--root`, or found from the current directory.
-fn stores(root: Option<&Path>) -> Stores {
+/// The client over `--root`, or over the stores found from the current
+/// directory. A `--root` without `kersh.yml` is an error.
+fn client(root: Option<&Path>) -> Result<Client, String> {
     if let Some(root) = root {
-        return Stores::from_root(root.to_path_buf());
+        return Client::from_root(root.to_path_buf()).map_err(|error| error.to_string());
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = crate::store::user_home();
-    Stores::discover(&cwd, home.as_deref())
+    Ok(Client::discover(&cwd))
 }
 
-fn client(root: Option<&Path>) -> Client {
-    Client::new(stores(root))
+/// Run `command` over the client for `root`, or fail with why the root
+/// does not open.
+fn with_client(root: Option<&Path>, command: impl FnOnce(&Client) -> ExitCode) -> ExitCode {
+    client(root).map_or_else(|error| fail(&error), |client| command(&client))
 }
 
 /// Print `value` as one JSON line.
@@ -716,6 +721,7 @@ enum CheckLine<'a> {
         agents: usize,
         problems: usize,
         ok: bool,
+        roots: &'a [PathBuf],
     },
 }
 
@@ -736,6 +742,7 @@ fn check(client: &Client, json: bool) -> ExitCode {
             agents: report.agents,
             problems: report.problems.len(),
             ok: report.ok(),
+            roots: &report.roots,
         };
         for line in problems.chain(std::iter::once(summary)) {
             if let Err(error) = print_json(&line) {
@@ -789,8 +796,11 @@ fn run_agent(
     root: Option<PathBuf>,
     prompt: &str,
 ) -> ExitCode {
-    let stores = stores(root.as_deref());
-    let agent = match stores.load(name) {
+    let client = match client(root.as_deref()) {
+        Ok(client) => client,
+        Err(error) => return fail(&error),
+    };
+    let agent = match client.stores().load(name) {
         Ok(agent) => agent,
         Err(error) => return fail(&error.to_string()),
     };
@@ -946,6 +956,7 @@ fn fail(message: &str) -> ExitCode {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::store::Stores;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
