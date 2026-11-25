@@ -415,13 +415,18 @@ fn one_unreadable_record_does_not_stop_a_restore() {
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join("record.json"), "{not json").unwrap();
 
-    crash_and_restart(&env);
+    // The first host's watcher may name the file too; only the log of
+    // the host that restores is counted.
+    env.stop_host();
+    let earlier = env.host_log().len();
+    env.kill_mux_hard();
+    env.start_host();
 
     env.wait_restored(&id, 1, "running");
     // The watcher ticks many times; the bad file is named once.
     std::thread::sleep(Duration::from_secs(2));
     let log = env.host_log();
-    let lines: Vec<&str> = log
+    let lines: Vec<&str> = log[earlier..]
         .lines()
         .filter(|line| line.contains("cccccccccccc/record.json"))
         .collect();
