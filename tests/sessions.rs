@@ -24,13 +24,15 @@ const CODEX_STREAM: &str = include_str!("fixtures/codex-stream.jsonl");
 /// `fail` exits 4, `spawn` starts a child and waits for it, and `spam`
 /// exits 0 leaving a child that keeps printing. Interactive, the last
 /// argument decides: `exit0`, `exit3`, `hold` to wait as itself, or
-/// anything else to wait.
+/// anything else to wait. Each log file is written whole to a temp name
+/// and moved into place, so a test that polls for it never reads a part.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.999 (Claude Code)"; exit 0; fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
-env > "$log.env"
+printf '%s\n' "$@" | put "$log.args"
+env | put "$log.env"
 headless=0; sid=""; prev=""; last=""
 for a in "$@"; do
   [ "$a" = "-p" ] && headless=1
@@ -39,13 +41,13 @@ for a in "$@"; do
 done
 if [ "$headless" = 1 ]; then
   prompt=$(cat)
-  printf '%s' "$prompt" > "$log.stdin"
+  printf '%s' "$prompt" | put "$log.stdin"
   case "$prompt" in
     hang*) echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'; exec sleep 600 ;;
     fail*) echo "boom" >&2; exit 4 ;;
     spawn*)
       sleep 600 &
-      echo $! > "$log.child"
+      echo $! | put "$log.child"
       echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'
       wait; exit 0 ;;
     spam*) ( while :; do echo tick; sleep 0.5; done ) & exit 0 ;;
@@ -66,11 +68,12 @@ esac
 /// a rollout file open the way Codex's own process does, and waits.
 const FAKE_CODEX: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.999.0"; exit 0; fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
+printf '%s\n' "$@" | put "$log.args"
 if [ "$1" = "exec" ]; then
-  cat > "$log.stdin"
+  put "$log.stdin"
   cat "$HOME/codex-stream.jsonl"
   exit 0
 fi
@@ -555,12 +558,14 @@ fn sigterm_to_the_wrapper_leaves_the_record_running_for_restore() {
     let wrapper = i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap();
     let harness = i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap();
     kill(wrapper, "TERM");
-    let record = env.wait(&id, "the signal reason", |r| {
-        r["reason"]
+    // Left running, the session is restored by the host that watches it;
+    // this fake keeps no transcript, so the restore holds it.
+    let record = env.wait(&id, "the restore after SIGTERM", |r| {
+        r["restores"][0]["after"]
             .as_str()
-            .is_some_and(|reason| reason.contains("SIGTERM"))
+            .is_some_and(|after| after.contains("SIGTERM"))
     });
-    assert_eq!(record["state"], "running");
+    assert_eq!(record["restores"][0]["outcome"], "held");
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(harness) {
         assert!(
@@ -580,12 +585,12 @@ fn sighup_to_the_wrapper_leaves_the_record_running_too() {
         i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
         "HUP",
     );
-    let record = env.wait(&id, "the signal reason", |r| {
-        r["reason"]
+    let record = env.wait(&id, "the restore after SIGHUP", |r| {
+        r["restores"][0]["after"]
             .as_str()
-            .is_some_and(|reason| reason.contains("SIGHUP"))
+            .is_some_and(|after| after.contains("SIGHUP"))
     });
-    assert_eq!(record["state"], "running");
+    assert_eq!(record["restores"][0]["outcome"], "held");
 }
 
 #[test]
@@ -815,6 +820,14 @@ fn relaunch_over_a_holder_s_old_pids(
         assert!(env.kersh(&["stop", &other]).status.success());
     }
     edit_record(&env, &holder, |r| r["state"] = "ended".into());
+    // The host folds a wrapper's note into its record and would undo the
+    // edit below; a note of an older launch changes nothing.
+    let note = env.state().join("sessions").join(&other).join("note.json");
+    if let Ok(text) = std::fs::read_to_string(&note) {
+        let mut value: Value = serde_json::from_str(&text).unwrap();
+        value["launch"] = 0.into();
+        std::fs::write(&note, serde_json::to_string(&value).unwrap()).unwrap();
+    }
     edit_record(&env, &other, |r| {
         r["conversation"]["id"] = uuid.clone().into();
         r["wrapper_pid"] = holder_wrapper;
@@ -1087,7 +1100,7 @@ fn the_group_limit_counts_only_running_sessions_of_its_own_group() {
 }
 
 #[test]
-fn a_harness_killed_by_a_signal_kersh_did_not_send_is_left_running_for_restore() {
+fn a_harness_killed_by_a_signal_kersh_did_not_send_is_restored_with_the_signal_as_cause() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code"], "wait");
     let record = env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
@@ -1095,12 +1108,15 @@ fn a_harness_killed_by_a_signal_kersh_did_not_send_is_left_running_for_restore()
         i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap(),
         "KILL",
     );
-    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
+    // The signal leaves the record running, and the host's restore then
+    // takes it; the restore names the signal as the cause.
+    let record = env.wait(&id, "a restore", |r| {
+        r["restores"].as_array().is_some_and(|l| !l.is_empty())
+    });
     assert_eq!(
-        record["reason"],
-        "killed by signal 9; left running for restore"
+        record["restores"][0]["after"],
+        "its pane closed (killed by signal 9)"
     );
-    assert_eq!(record["state"], "running");
 }
 
 #[test]
@@ -1123,7 +1139,7 @@ fn a_harness_that_cannot_start_holds_the_pane_with_the_cause() {
 }
 
 #[test]
-fn sigterm_to_a_headless_wrapper_leaves_the_record_running_and_stops_the_harness() {
+fn sigterm_to_a_headless_wrapper_holds_the_session_and_stops_the_harness() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "hang");
     let record = env.wait(&id, "the pids", |r| {
@@ -1139,9 +1155,11 @@ fn sigterm_to_a_headless_wrapper_leaves_the_record_running_and_stops_the_harness
         i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
         "TERM",
     );
-    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
-    assert_eq!(record["reason"], "SIGTERM; left running for restore");
-    assert_eq!(record["state"], "running");
+    let record = env.wait(&id, "a restore", |r| {
+        r["restores"].as_array().is_some_and(|l| !l.is_empty())
+    });
+    assert_eq!(record["restores"][0]["after"], "its pane closed (SIGTERM)");
+    assert_eq!(record["state"], "held", "a headless run is not resumed");
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(harness) {
         assert!(

@@ -44,6 +44,23 @@ pub struct LaunchFile {
     pub cwd: PathBuf,
     /// The prompt file a headless harness reads on stdin.
     pub stdin: Option<PathBuf>,
+    /// Printed into the pane before anything runs: the last screen
+    /// capture and the restore line.
+    #[serde(default)]
+    pub preface: Option<String>,
+    /// Run nothing: show why and wait, as a restore that cannot resume
+    /// safely leaves the session.
+    #[serde(default)]
+    pub hold: Option<Hold>,
+}
+
+/// A held pane's text, and whether RET runs anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub message: String,
+    /// RET asks the host to run the held command; the host gates it like
+    /// a resume.
+    pub ret: bool,
 }
 
 /// How the harness ended, as the wrapper saw it.
@@ -89,6 +106,11 @@ fn say(text: &str) {
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(text.as_bytes());
     let _ = out.flush();
+}
+
+/// `text` with each line ended by CR LF, as a raw pane needs.
+fn terminal_lines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 fn pid_i32(pid: u32) -> i32 {
@@ -142,6 +164,7 @@ pub fn run(paths: &Paths, id: &str) -> std::process::ExitCode {
         }
     };
     let wrapper = Wrapper {
+        paths: paths.clone(),
         note_path: paths.note(id),
         events_path: paths.events(id),
         note: Note {
@@ -158,6 +181,7 @@ pub fn run(paths: &Paths, id: &str) -> std::process::ExitCode {
 }
 
 struct Wrapper {
+    paths: Paths,
     launch: LaunchFile,
     note_path: PathBuf,
     events_path: PathBuf,
@@ -178,6 +202,12 @@ enum Cause {
 impl Wrapper {
     async fn run(mut self) -> std::process::ExitCode {
         write_note(&self.note_path, &self.note);
+        if let Some(preface) = &self.launch.preface {
+            say(&terminal_lines(preface));
+        }
+        if let Some(hold) = self.launch.hold.clone() {
+            return self.held(&hold).await;
+        }
         let outcome = match self.launch.mode {
             Mode::Headless => self.headless().await,
             Mode::Interactive => self.interactive().await,
@@ -270,6 +300,66 @@ impl Wrapper {
             _ = hup.recv() => {}
         }
         std::process::ExitCode::SUCCESS
+    }
+
+    /// A pane a restore left held: show why, then wait. Each RET asks the
+    /// host to run the held command; the host ends this pane when it
+    /// does, and a refusal is printed here.
+    async fn held(&self, hold: &Hold) -> std::process::ExitCode {
+        say(&terminal_lines(&format!("{}\n", hold.message)));
+        let (Ok(mut term), Ok(mut hup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) else {
+            return std::process::ExitCode::FAILURE;
+        };
+        let _int = signal(SignalKind::interrupt());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if hold.ret {
+            std::thread::spawn(move || {
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                while matches!(stdin.read_line(&mut line), Ok(n) if n > 0) {
+                    line.clear();
+                    if tx.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
+        } else {
+            drop(tx);
+        }
+        let id = self.launch.id.clone();
+        // The host's answer comes while the signals are still watched,
+        // because a RET it accepts ends this pane before it answers.
+        let (answer_tx, mut answers) =
+            tokio::sync::mpsc::unbounded_channel::<Result<(), crate::session::SessionError>>();
+        let mut asking = false;
+        loop {
+            tokio::select! {
+                _ = term.recv() => return std::process::ExitCode::SUCCESS,
+                _ = hup.recv() => return std::process::ExitCode::SUCCESS,
+                Some(()) = rx.recv(), if !asking => {
+                    asking = true;
+                    say("[kersh] asking the host to run it\r\n");
+                    let paths = self.paths.clone();
+                    let id = id.clone();
+                    let answer_tx = answer_tx.clone();
+                    std::thread::spawn(move || {
+                        let answer = crate::client::Client::discover(Path::new("/"))
+                            .with_paths(paths)
+                            .held_return(&id);
+                        let _ = answer_tx.send(answer);
+                    });
+                }
+                Some(answer) = answers.recv() => {
+                    asking = false;
+                    if let Err(error) = answer {
+                        say(&format!("[kersh] RET refused: {error}\r\n"));
+                    }
+                }
+            }
+        }
     }
 
     fn command(&self, argv: &[String]) -> Result<tokio::process::Command, String> {

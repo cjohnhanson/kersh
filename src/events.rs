@@ -459,6 +459,20 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
+    /// Open a writer on a file the test's own writer just released. A
+    /// process another test forks at that moment holds a copy of the old
+    /// descriptor, and so the lock, until its exec closes it.
+    fn reopen(path: &Path) -> Writer {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match Writer::open(path) {
+                Ok(writer) => return writer,
+                Err(error) if std::time::Instant::now() > deadline => panic!("{error}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
     #[test]
     fn events_are_numbered_from_one_and_read_after_since() {
         let tmp = tempfile::tempdir().unwrap();
@@ -503,7 +517,7 @@ mod tests {
 
         assert_eq!(read(&path, 0).unwrap().len(), 2, "readers skip it");
 
-        let mut writer = Writer::open(&path).unwrap();
+        let mut writer = reopen(&path);
         assert_eq!(writer.next_seq(), 3, "numbering continues after the last");
         writer.append(parse_stderr("three")).unwrap();
         let all = read(&path, 0).unwrap();
@@ -535,7 +549,7 @@ mod tests {
             1,
             "a reader never sees an event the next writer drops"
         );
-        let mut writer = Writer::open(&path).unwrap();
+        let mut writer = reopen(&path);
         assert_eq!(writer.next_seq(), 2, "the cut event's number is reused");
         writer.append(parse_stderr("two")).unwrap();
         let all = read(&path, 0).unwrap();

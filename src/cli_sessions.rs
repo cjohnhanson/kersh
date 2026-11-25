@@ -65,6 +65,9 @@ pub enum SessionCmd {
         id: String,
         json: bool,
     },
+    RestartMux {
+        json: bool,
+    },
     Send {
         id: String,
         prompt_file: PathBuf,
@@ -260,6 +263,15 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
         SessionCmd::Restart { id, json } => match client().restart(&id) {
             Ok(record) => {
                 print_record(&record, json);
+                ExitCode::SUCCESS
+            }
+            Err(error) => report(&error),
+        },
+        SessionCmd::RestartMux { json } => match client().restart_mux() {
+            Ok(records) => {
+                for record in &records {
+                    print_record(record, json);
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => report(&error),

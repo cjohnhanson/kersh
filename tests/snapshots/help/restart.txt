@@ -1,10 +1,11 @@
-Restart an interactive session on its conversation
+Restart an interactive session on its conversation, or the session server with --mux
 
-Usage: kersh restart [OPTIONS] <ID>
+Usage: kersh restart [OPTIONS] [ID]
 
 Arguments:
-  <ID>  The session
+  [ID]  The session
 
 Options:
+      --mux   Stop the session server, start a new one, and restore every session, as after an upgrade that changes its wire version
       --json  Print JSON, one object per line
   -h, --help  Print help

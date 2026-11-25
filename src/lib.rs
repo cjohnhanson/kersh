@@ -32,6 +32,7 @@ pub mod model;
 pub mod mux;
 pub mod paths;
 pub mod proto;
+pub mod restore;
 pub mod runtime;
 pub mod service;
 pub mod session;

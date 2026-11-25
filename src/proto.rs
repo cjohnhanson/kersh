@@ -66,6 +66,17 @@ pub enum Op {
         id: String,
     },
     HarnessList,
+    /// RET in a held pane: run the held command, gated like a resume.
+    HeldReturn {
+        id: String,
+    },
+    /// Capture a session's screen now, as after a detach.
+    Capture {
+        id: String,
+    },
+    /// Stop the session server, start a new one, and restore every
+    /// session.
+    RestartMux,
 }
 
 /// A start, resolved by the client from the agent file and runtimes.

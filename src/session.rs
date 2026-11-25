@@ -236,6 +236,42 @@ pub struct Conversation {
     pub source: ConversationSource,
 }
 
+/// How a restore left a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreOutcome {
+    /// The harness resumed its conversation.
+    Resumed,
+    /// The pane holds its command until a person decides.
+    Held,
+}
+
+/// One restore of a session, newest last on the record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restore {
+    pub at: String,
+    /// What took the session down: `a reboot`, `the session server
+    /// stopped`, `kersh restart --mux`, or the wrapper's own reason.
+    pub after: String,
+    pub outcome: RestoreOutcome,
+    /// The build change, when the harness build differs from the
+    /// recorded one: `2.1.0 -> 2.2.0`.
+    pub build_change: Option<String>,
+    /// The line a front end shows: `restored at <time> after <cause>;
+    /// tools that were running did not finish`.
+    pub line: String,
+}
+
+/// What RET runs in a held pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldRun {
+    /// The first launch again: a new conversation with the first prompt.
+    Fresh,
+    /// The harness's resume of the recorded conversation.
+    Resume,
+}
+
 /// A pane size in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSize {
@@ -277,6 +313,10 @@ pub struct Record {
     pub labels: BTreeMap<String, String>,
     pub group: Option<String>,
     pub pgid: Option<i32>,
+    /// The launch whose wrapper reported `pgid`. Absent, an earlier
+    /// launch's.
+    #[serde(default)]
+    pub pgid_launch: Option<u32>,
     pub boot_id: Option<String>,
     pub wrapper_pid: Option<i32>,
     pub harness_pid: Option<i32>,
@@ -288,7 +328,13 @@ pub struct Record {
     /// Why the session is held or ended: `exit status 3`, `interrupted`,
     /// `stopped`.
     pub reason: Option<String>,
-    pub restores: u32,
+    /// Every restore, oldest first. An older record's count of restores
+    /// reads as none.
+    #[serde(default, deserialize_with = "restores_or_count")]
+    pub restores: Vec<Restore>,
+    /// What RET runs while the session is held, when RET runs anything.
+    #[serde(default)]
+    pub held_run: Option<HeldRun>,
     /// How many times the session was resumed or restarted.
     pub launches: u32,
     /// The last progress line, filled when a record is read for a list.
@@ -408,6 +454,25 @@ impl SessionError {
     }
 }
 
+/// The restores of a record, or none for an older record's integer
+/// count of them.
+fn restores_or_count<'de, D>(deserializer: D) -> Result<Vec<Restore>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Restores {
+        List(Vec<Restore>),
+        #[allow(dead_code)] // The count is read only to accept its form.
+        Count(u64),
+    }
+    Ok(match Restores::deserialize(deserializer)? {
+        Restores::List(list) => list,
+        Restores::Count(_) => Vec::new(),
+    })
+}
+
 /// Read one record, refusing a schema newer than this build's.
 pub fn read_record(path: &Path) -> Result<Record, SessionError> {
     let text = std::fs::read_to_string(path)
@@ -432,15 +497,31 @@ pub fn read_record(path: &Path) -> Result<Record, SessionError> {
 }
 
 /// Every record under `sessions`, sorted by creation time then id.
+/// One record that does not read is an error.
 pub fn read_records(sessions: &Path) -> Result<Vec<Record>, SessionError> {
+    let (records, mut unread) = read_records_skipping(sessions);
+    match unread.drain(..).next() {
+        Some((_, error)) => Err(error),
+        None => Ok(records),
+    }
+}
+
+/// Every record under `sessions` that reads, sorted by creation time
+/// then id, and the path and error of each that does not.
+#[must_use]
+pub fn read_records_skipping(sessions: &Path) -> (Vec<Record>, Vec<(PathBuf, SessionError)>) {
     let Ok(entries) = std::fs::read_dir(sessions) else {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     };
     let mut records = Vec::new();
+    let mut unread = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path().join("record.json");
         if path.is_file() {
-            records.push(read_record(&path)?);
+            match read_record(&path) {
+                Ok(record) => records.push(record),
+                Err(error) => unread.push((path, error)),
+            }
         }
     }
     records.sort_by(|a, b| {
@@ -448,13 +529,43 @@ pub fn read_records(sessions: &Path) -> Result<Vec<Record>, SessionError> {
             .cmp(&b.created_at)
             .then_with(|| a.id.cmp(&b.id))
     });
-    Ok(records)
+    (records, unread)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_record_that_counts_its_restores_loads_with_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("a");
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = serde_json::json!({
+            "schema": RECORD_SCHEMA,
+            "id": "a", "name": null, "harness": "claude-code", "mode": "interactive",
+            "state": "ended",
+            "build": {"installer": "path", "path": "/bin/claude", "version": "1"},
+            "environment": {"kind": "local", "cwd": "/", "tempdir": null},
+            "agent": null,
+            "runtime": {"name": null, "settings": {
+                "harness": "claude-code", "mode": "interactive", "model": null,
+                "environment": "local", "profile": null, "resume_prompt": null,
+                "tempdir": false, "env": {}}},
+            "system_prompt": null, "conversation": null, "agent_flags": [],
+            "first_prompt": null, "labels": {}, "group": null, "pgid": null,
+            "boot_id": null, "wrapper_pid": null, "harness_pid": null,
+            "rmux_session": "kersh-a",
+            "pane_size": {"cols": 80, "rows": 24},
+            "created_at": "2026-11-01T00:00:00.000Z", "ended_at": null,
+            "exit_status": null, "reason": null, "restores": 0, "launches": 1
+        });
+        std::fs::write(dir.join("record.json"), record.to_string()).unwrap();
+        let records = read_records(tmp.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records.first().unwrap().restores.is_empty());
+    }
 
     #[test]
     fn a_newer_record_schema_is_refused_naming_both() {

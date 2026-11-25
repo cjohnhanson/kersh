@@ -160,10 +160,16 @@ enum Command {
         #[command(flatten)]
         json: JsonArg,
     },
-    /// Restart an interactive session on its conversation.
+    /// Restart an interactive session on its conversation, or the session
+    /// server with --mux.
     Restart {
         /// The session.
-        id: String,
+        #[arg(required_unless_present = "mux", conflicts_with = "mux")]
+        id: Option<String>,
+        /// Stop the session server, start a new one, and restore every
+        /// session, as after an upgrade that changes its wire version.
+        #[arg(long)]
+        mux: bool,
         #[command(flatten)]
         json: JsonArg,
     },
@@ -505,9 +511,12 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
             prompt_file,
             json: json.json,
         },
-        Command::Restart { id, json } => S::Restart {
-            id,
-            json: json.json,
+        Command::Restart { id, mux, json } => match (id, mux) {
+            (Some(id), false) => S::Restart {
+                id,
+                json: json.json,
+            },
+            _ => S::RestartMux { json: json.json },
         },
         Command::Send { id, prompt_file } => S::Send { id, prompt_file },
         Command::Events {

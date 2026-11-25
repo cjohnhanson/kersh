@@ -8,11 +8,18 @@
 //!
 //! Reads do not need the host: `kersh ps`, `events`, and `screen` read the
 //! files and the session server directly.
+//!
+//! The host holds a connection to the session server and watches it, so a
+//! server that dies or a session that vanishes is restored at once, not
+//! only at the next host start (see [`restoring`]).
 
-use std::collections::{BTreeMap, HashMap};
+mod restoring;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -76,6 +83,15 @@ struct Host {
     /// When each interactive Codex session was last searched for its
     /// rollout file.
     searched: std::sync::Mutex<HashMap<String, Instant>>,
+    /// The live session server speaks another rmux wire version: session
+    /// operations are refused until `kersh restart --mux`.
+    skew: AtomicBool,
+    /// When the watcher last tried to restore each session, so a restore
+    /// that cannot create its pane is not retried on every tick.
+    attempted: std::sync::Mutex<HashMap<String, Instant>>,
+    /// The record files the background paths last found unreadable, so
+    /// each is logged once while it stays so.
+    unread: std::sync::Mutex<HashSet<PathBuf>>,
 }
 
 /// Run the host until it is killed. Returns at once, successfully, when
@@ -122,6 +138,9 @@ pub fn run(paths: Paths) -> Result<(), String> {
         writer: Mutex::new(()),
         changes,
         searched: std::sync::Mutex::new(HashMap::new()),
+        skew: AtomicBool::new(false),
+        attempted: std::sync::Mutex::new(HashMap::new()),
+        unread: std::sync::Mutex::new(HashSet::new()),
     });
     let result = runtime.block_on(serve(host));
     drop(lock);
@@ -141,7 +160,18 @@ fn write_lock(file: &std::fs::File, lock: &HostLock) -> Result<(), String> {
 }
 
 async fn serve(host: Arc<Host>) -> Result<(), String> {
-    host.ensure_mux().await?;
+    match host.ensure_mux().await {
+        Ok((mux, started)) => {
+            let _guard = host.writer.lock().await;
+            host.prune_ended();
+            let cause = started.then_some(restoring::SERVER_STOPPED);
+            host.restore_locked(&mux, cause).await;
+        }
+        // A server of another wire version keeps its agents running; the
+        // host lists from the records and waits for `kersh restart --mux`.
+        Err(error) if host.skew.load(Ordering::SeqCst) => eprintln!("kersh host: {error}"),
+        Err(error) => return Err(error),
+    }
     let socket = host.paths.host_sock();
     // Under the lock, a socket file left behind is stale.
     let _ = std::fs::remove_file(&socket);
@@ -154,8 +184,21 @@ async fn serve(host: Arc<Host>) -> Result<(), String> {
     eprintln!("kersh host {} serving {}", proto::VERSION, socket.display());
     let watcher = Arc::clone(&host);
     tokio::spawn(async move {
+        let mut server = None;
+        let mut captured = Instant::now();
+        let mut pruned = Instant::now();
         loop {
             watcher.watch_once().await;
+            watcher.watch_server(&mut server).await;
+            if captured.elapsed() >= watcher.config.capture_every() {
+                watcher.capture_all().await;
+                captured = Instant::now();
+            }
+            if pruned.elapsed() >= Duration::from_secs(3600) {
+                let _guard = watcher.writer.lock().await;
+                watcher.prune_ended();
+                pruned = Instant::now();
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
@@ -178,6 +221,69 @@ async fn send_line(
     line.push(b'\n');
     writer.write_all(&line).await?;
     writer.flush().await
+}
+
+/// Apply a wrapper's note to its record: the pids it reported, then how
+/// the harness exited. A note of an older launch changes nothing.
+fn fold_note(current: &mut Record, note: Note) {
+    if note.launch != current.launches {
+        return;
+    }
+    current.wrapper_pid = Some(note.wrapper_pid);
+    current.harness_pid = note.harness_pid;
+    // A held pane runs no harness; the old group stays recorded, with
+    // the launch that reported it, until it is seen empty.
+    if note.pgid.is_some() {
+        current.pgid = note.pgid;
+        current.pgid_launch = Some(note.launch);
+    }
+    if note.boot_id.is_some() {
+        current.boot_id = note.boot_id;
+    }
+    if let Some(exit) = note.exit
+        && current.state == State::Running
+    {
+        match exit.kind {
+            ExitKind::Ended => {
+                current.state = State::Ended;
+                current.ended_at = Some(exit.at);
+                current.exit_status = exit.status;
+                current.reason = Some(exit.reason);
+            }
+            ExitKind::Held => {
+                current.state = State::Held;
+                current.exit_status = exit.status;
+                current.reason = Some(exit.reason);
+            }
+            ExitKind::Signal => {
+                current.reason = Some(exit.reason);
+            }
+        }
+    }
+}
+
+/// Whether conversation `id` is free, from the process-table search for
+/// a holder. A table that cannot be read refuses: kersh never starts a
+/// second harness on a conversation it cannot see.
+fn holder_verdict(id: &str, holder: Result<Option<i32>, String>) -> Result<(), SessionError> {
+    match holder {
+        Ok(None) => Ok(()),
+        Ok(Some(pid)) => Err(SessionError::failed(format!(
+            "another process (pid {pid}) already runs conversation {id}; \
+             stop that process or pick another conversation"
+        ))),
+        Err(error) => Err(SessionError::failed(format!(
+            "cannot tell whether another process runs conversation {id}: {error}; \
+             check that `ps` runs for this user, then run the command again"
+        ))),
+    }
+}
+
+/// Read a session's note, if its wrapper wrote one.
+fn read_note(paths: &Paths, id: &str) -> Option<Note> {
+    std::fs::read_to_string(paths.note(id))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
 }
 
 fn to_value(value: &impl Serialize) -> Result<Value, SessionError> {
@@ -248,6 +354,42 @@ impl Host {
                 Ok(Value::Null)
             }
             Op::HarnessList => to_value(&harness::list(&self.login_env)),
+            Op::HeldReturn { id } => {
+                self.held_return(&id).await?;
+                Ok(Value::Null)
+            }
+            Op::Capture { id } => {
+                let record = self.load(&id)?;
+                let mux = self.mux().await?;
+                self.capture_one(&mux, &record).await;
+                Ok(Value::Null)
+            }
+            Op::RestartMux => to_value(&self.restart_mux().await?),
+        }
+    }
+
+    /// The records a background path (restore, the watcher, captures,
+    /// the prune) acts on. A record that does not read is skipped and
+    /// logged once while it stays unreadable; the others still go on.
+    fn background_records(&self) -> Vec<Record> {
+        let (records, unread) = crate::session::read_records_skipping(&self.paths.sessions());
+        if let Ok(mut logged) = self.unread.lock() {
+            for (path, error) in &unread {
+                if !logged.contains(path) {
+                    eprintln!(
+                        "kersh host: skipped an unreadable record; fix or remove the file: {error}"
+                    );
+                }
+            }
+            *logged = unread.into_iter().map(|(path, _)| path).collect();
+        }
+        records
+    }
+
+    /// [`Self::save`] where a failure has no caller to go to: it is logged.
+    fn save_or_log(&self, record: &Record) {
+        if let Err(error) = self.save(record) {
+            eprintln!("kersh host: session {}: {error}", record.id);
         }
     }
 
@@ -266,19 +408,33 @@ impl Host {
         crate::session::read_record(&path)
     }
 
+    /// The session server for a session operation. A server of another
+    /// wire version is refused with the way past it.
     async fn mux(&self) -> Result<Rmux, SessionError> {
-        crate::mux::check_wire(&self.paths).map_err(SessionError::failed)?;
+        if let Err(error) = crate::mux::check_wire(&self.paths) {
+            self.skew.store(true, Ordering::SeqCst);
+            return Err(SessionError::failed(error));
+        }
+        self.skew.store(false, Ordering::SeqCst);
         match Rmux::connect(&self.paths.mux_sock()).await {
             Ok(mux) => Ok(mux),
-            Err(_) => self.ensure_mux().await.map_err(SessionError::failed),
+            Err(_) => self
+                .ensure_mux()
+                .await
+                .map(|(mux, _)| mux)
+                .map_err(SessionError::failed),
         }
     }
 
-    /// Connect to the session server, starting it when none answers.
-    async fn ensure_mux(&self) -> Result<Rmux, String> {
+    /// Connect to the session server, starting it when none answers. The
+    /// flag says whether this call started it.
+    async fn ensure_mux(&self) -> Result<(Rmux, bool), String> {
+        if let Err(error) = crate::mux::check_wire(&self.paths) {
+            self.skew.store(true, Ordering::SeqCst);
+            return Err(error);
+        }
         if let Ok(mux) = Rmux::connect(&self.paths.mux_sock()).await {
-            crate::mux::check_wire(&self.paths)?;
-            return Ok(mux);
+            return Ok((mux, false));
         }
         let mut argv = self.entry.clone();
         argv.extend([
@@ -297,7 +453,7 @@ impl Host {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Ok(mux) = Rmux::connect(&self.paths.mux_sock()).await {
-                return Ok(mux);
+                return Ok((mux, true));
             }
             if Instant::now() > deadline {
                 return Err(format!(
@@ -525,6 +681,7 @@ impl Host {
             labels: launch.labels.clone(),
             group: launch.group.clone(),
             pgid: None,
+            pgid_launch: None,
             boot_id: crate::service::boot_id(),
             wrapper_pid: None,
             harness_pid: None,
@@ -534,7 +691,8 @@ impl Host {
             ended_at: None,
             exit_status: None,
             reason: None,
-            restores: 0,
+            restores: Vec::new(),
+            held_run: None,
             launches: 1,
             progress: None,
         };
@@ -546,6 +704,8 @@ impl Host {
             prompt.as_deref(),
             resume,
             record.first_prompt.clone(),
+            None,
+            None,
         )?;
         self.save(&record)?;
         if let Err(error) = self.create_pane(&mux, &record).await {
@@ -561,6 +721,7 @@ impl Host {
     }
 
     /// Write `launch.json` for the record's current launch.
+    #[allow(clippy::too_many_arguments)] // Each part of one launch file.
     fn write_launch(
         &self,
         record: &Record,
@@ -568,6 +729,8 @@ impl Host {
         prompt_arg: Option<&str>,
         resume: bool,
         stdin: Option<PathBuf>,
+        preface: Option<String>,
+        hold: Option<crate::wrapper::Hold>,
     ) -> Result<(), SessionError> {
         let system_text = record
             .system_prompt
@@ -607,6 +770,8 @@ impl Host {
             } else {
                 None
             },
+            preface,
+            hold,
         };
         crate::paths::write_json(&self.paths.launch(&record.id), &file)
             .map_err(|error| SessionError::failed(error.to_string()))
@@ -671,11 +836,14 @@ impl Host {
     async fn stop_on(&self, mux: &impl Sessions, id: &str) -> Result<Record, SessionError> {
         let _guard = self.writer.lock().await;
         let mut record = self.load(id)?;
+        // A clean stop is one of the times the screen is captured.
+        self.capture_one(mux, &record).await;
         self.end_pane(mux, &record).await?;
         if matches!(record.state, State::Running | State::Held | State::Lost) {
             record.state = State::Ended;
             record.reason = Some("stopped".to_owned());
             record.ended_at = Some(crate::util::now_rfc3339());
+            record.held_run = None;
             self.save(&record)?;
         }
         Ok(record)
@@ -750,44 +918,34 @@ impl Host {
         // Before the pane goes: a refused relaunch leaves the session as
         // it was.
         self.check_conversation_free(record.harness, &conversation.id, Some(&record))?;
-        self.end_pane(mux, &record).await?;
-        let launch = record.launches + 1;
-        let stdin = match &prompt {
-            Some(text) => {
-                let path = self.paths.session(id).join(format!("prompt-{launch}.md"));
-                crate::paths::write_private(&path, text.as_bytes())
-                    .map_err(|error| SessionError::failed(error.to_string()))?;
-                Some(path)
-            }
-            None => None,
-        };
-        record.launches = launch;
-        record.state = State::Running;
-        record.reason = None;
-        record.ended_at = None;
-        record.exit_status = None;
-        record.wrapper_pid = None;
-        record.harness_pid = None;
-        record.pgid = None;
-        record.boot_id = crate::service::boot_id();
-        let env = self.relaunch_env(&record)?;
-        self.write_launch(&record, &env, prompt.as_deref(), true, stdin)?;
-        self.save(&record)?;
-        if let Err(error) = self.create_pane(mux, &record).await {
-            record.state = State::Held;
-            record.reason = Some(format!("the session server refused the pane: {error}"));
-            self.save(&record)?;
-            return Err(SessionError::failed(
-                record.reason.clone().unwrap_or_default(),
-            ));
+        // A group of an earlier launch (a pane a restore holds runs no
+        // harness) is the old session's: it is checked, and the pane
+        // stays on a refusal. The current launch's group (a running
+        // harness, or a wrapper that held its own pane) empties once its
+        // pane ends.
+        let current = restoring::current_group(&record);
+        if let Some(pgid) = restoring::old_group(&record)
+            && crate::restore::group_alive(pgid)
+        {
+            return Err(restoring::old_group_runs(pgid));
         }
+        self.end_pane(mux, &record).await?;
+        if let Some(pgid) = current
+            && !restoring::group_empties(pgid).await
+        {
+            return Err(restoring::group_outlives_pane(id, pgid));
+        }
+        self.launch_again(mux, &mut record, restoring::How::Resume { prompt }, None)
+            .await?;
         Ok(record)
     }
 
     /// Refuse a conversation that another live record holds, or that a
-    /// harness process runs other than `own`'s own launch: its wrapper,
-    /// the wrapper's descendants, and its harness's process group, when
-    /// `own` is running or held and from this boot. A process table that
+    /// harness process runs other than `own`'s own launch: its wrapper and
+    /// the wrapper's descendants, when `own` is running or held and from
+    /// this boot, and its harness's process group, when `own` is running.
+    /// A held pane runs no harness, so its recorded group is the old
+    /// session's and a harness in it still counts. A process table that
     /// cannot be read refuses too. Called under the writer lock.
     fn check_conversation_free(
         &self,
@@ -796,58 +954,64 @@ impl Host {
         own: Option<&Record>,
     ) -> Result<(), SessionError> {
         let records = crate::session::read_records(&self.paths.sessions())?;
-        if let Some(other) = records.iter().find(|record| {
-            Some(record.id.as_str()) != own.map(|own| own.id.as_str())
-                && matches!(record.state, State::Running | State::Held)
-                && record
-                    .conversation
-                    .as_ref()
-                    .is_some_and(|conversation| conversation.id == id)
-        }) {
-            return Err(SessionError::failed(format!(
-                "session {} already holds conversation {id}",
-                other.id
-            )));
-        }
-        // Only a live record's process ids are its own: an ended record's
-        // may name other processes now, and so may ids from another boot
-        // or from a boot either side cannot name.
-        let boot = crate::service::boot_id();
-        let own = own
-            .filter(|record| matches!(record.state, State::Running | State::Held))
-            .filter(|record| match (&record.boot_id, &boot) {
-                (Some(then), Some(now)) => then == now,
-                _ => false,
-            })
-            .map(|record| crate::discover::Own {
-                roots: record
-                    .wrapper_pid
-                    .into_iter()
-                    .chain(record.harness_pid)
-                    .collect(),
-                pgid: record.pgid,
-            })
-            .unwrap_or_default();
-        match crate::discover::holder(harness.program(), id, &own) {
-            Ok(None) => Ok(()),
-            Ok(Some(pid)) => Err(SessionError::failed(format!(
-                "another process (pid {pid}) already runs conversation {id}; \
-                 stop that process or pick another conversation"
-            ))),
-            Err(error) => Err(SessionError::failed(format!(
-                "cannot tell whether another process runs conversation {id}: {error}"
-            ))),
-        }
+        conversation_free_among(&records, harness, id, own)
     }
+}
 
+/// [`Host::check_conversation_free`] against `records`.
+fn conversation_free_among(
+    records: &[Record],
+    harness: Harness,
+    id: &str,
+    own: Option<&Record>,
+) -> Result<(), SessionError> {
+    if let Some(other) = records.iter().find(|record| {
+        Some(record.id.as_str()) != own.map(|own| own.id.as_str())
+            && matches!(record.state, State::Running | State::Held)
+            && record
+                .conversation
+                .as_ref()
+                .is_some_and(|conversation| conversation.id == id)
+    }) {
+        return Err(SessionError::failed(format!(
+            "session {} already holds conversation {id}",
+            other.id
+        )));
+    }
+    // Only a live record's process ids are its own: an ended record's
+    // may name other processes now, and so may ids from another boot
+    // or from a boot either side cannot name.
+    let boot = crate::service::boot_id();
+    let own = own
+        .filter(|record| matches!(record.state, State::Running | State::Held))
+        .filter(|record| match (&record.boot_id, &boot) {
+            (Some(then), Some(now)) => then == now,
+            _ => false,
+        })
+        .map(|record| crate::discover::Own {
+            roots: record
+                .wrapper_pid
+                .into_iter()
+                .chain(record.harness_pid)
+                .collect(),
+            pgid: record.pgid.filter(|_| record.state == State::Running),
+        })
+        .unwrap_or_default();
+    holder_verdict(id, crate::discover::holder(harness.program(), id, &own))
+}
+
+impl Host {
     /// The environment of a relaunch: the last launch's, which already
-    /// holds the login environment and kersh's variables.
-    fn relaunch_env(&self, record: &Record) -> Result<Vec<(String, String)>, SessionError> {
-        let text = std::fs::read_to_string(self.paths.launch(&record.id))
-            .map_err(|error| SessionError::failed(error.to_string()))?;
-        let file: LaunchFile =
-            serde_json::from_str(&text).map_err(|error| SessionError::failed(error.to_string()))?;
-        Ok(file.env)
+    /// holds the login environment and kersh's variables. Without one, the
+    /// login environment.
+    fn relaunch_env(&self, record: &Record) -> Vec<(String, String)> {
+        let env = std::fs::read_to_string(self.paths.launch(&record.id))
+            .ok()
+            .and_then(|text| serde_json::from_str::<LaunchFile>(&text).ok())
+            .map_or_else(|| self.login_env.clone(), |file| file.env);
+        let mut env: BTreeMap<String, String> = env.into_iter().collect();
+        env.insert("KERSH_SESSION".to_owned(), record.id.clone());
+        env.into_iter().collect()
     }
 
     async fn send(&self, id: &str, text: &str) -> Result<(), SessionError> {
@@ -909,10 +1073,7 @@ impl Host {
 
     /// Fold every live session's note into its record.
     async fn watch_once(&self) {
-        let Ok(records) = crate::session::read_records(&self.paths.sessions()) else {
-            return;
-        };
-        for record in records {
+        for record in self.background_records() {
             if !matches!(record.state, State::Running | State::Held) {
                 continue;
             }
@@ -945,33 +1106,8 @@ impl Host {
             if current != record {
                 continue;
             }
-            if let Some(note) = note.filter(|note| note.launch == current.launches) {
-                current.wrapper_pid = Some(note.wrapper_pid);
-                current.harness_pid = note.harness_pid;
-                current.pgid = note.pgid;
-                if note.boot_id.is_some() {
-                    current.boot_id = note.boot_id;
-                }
-                if let Some(exit) = note.exit
-                    && current.state == State::Running
-                {
-                    match exit.kind {
-                        ExitKind::Ended => {
-                            current.state = State::Ended;
-                            current.ended_at = Some(exit.at);
-                            current.exit_status = exit.status;
-                            current.reason = Some(exit.reason);
-                        }
-                        ExitKind::Held => {
-                            current.state = State::Held;
-                            current.exit_status = exit.status;
-                            current.reason = Some(exit.reason);
-                        }
-                        ExitKind::Signal => {
-                            current.reason = Some(exit.reason);
-                        }
-                    }
-                }
+            if let Some(note) = note {
+                fold_note(&mut current, note);
             }
             if current.conversation.is_none() {
                 current.conversation = self.discover_conversation(&current);
@@ -1077,6 +1213,9 @@ mod tests {
             writer: Mutex::new(()),
             changes: broadcast::channel(16).0,
             searched: std::sync::Mutex::new(HashMap::new()),
+            skew: AtomicBool::new(false),
+            attempted: std::sync::Mutex::new(HashMap::new()),
+            unread: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -1122,6 +1261,7 @@ mod tests {
             labels: BTreeMap::new(),
             group: group.map(str::to_owned),
             pgid: None,
+            pgid_launch: None,
             boot_id: None,
             wrapper_pid: None,
             harness_pid: None,
@@ -1131,7 +1271,8 @@ mod tests {
             ended_at: None,
             exit_status: None,
             reason: None,
-            restores: 0,
+            restores: Vec::new(),
+            held_run: None,
             launches: 1,
             progress: None,
         }
@@ -1140,7 +1281,8 @@ mod tests {
     /// Save `record` with a launch file, as a start leaves it.
     fn put(host: &Host, record: &Record) {
         crate::paths::private_dir(&host.paths.session(&record.id)).unwrap();
-        host.write_launch(record, &[], None, false, None).unwrap();
+        host.write_launch(record, &[], None, false, None, None, None)
+            .unwrap();
         host.save(record).unwrap();
     }
 
@@ -1161,6 +1303,16 @@ mod tests {
         let error = host.stop_on(&fake, "a").await.unwrap_err();
         assert!(error.to_string().contains("unreachable"), "{error}");
         assert_eq!(host.load("a").unwrap(), running);
+    }
+
+    #[test]
+    fn a_process_table_that_cannot_be_read_refuses_the_conversation() {
+        holder_verdict("c", Ok(None)).unwrap();
+        let held = holder_verdict("c", Ok(Some(42))).unwrap_err();
+        assert!(held.to_string().contains("pid 42"), "{held}");
+        let unread = holder_verdict("c", Err("no ps".to_owned())).unwrap_err();
+        assert!(unread.to_string().contains("no ps"), "{unread}");
+        assert!(unread.to_string().contains("`ps` runs"), "{unread}");
     }
 
     #[test]
@@ -1254,6 +1406,115 @@ mod tests {
             "the pane was killed"
         );
         assert_eq!(host.load("a").unwrap().state, State::Held);
+    }
+
+    /// A process in a process group of its own, as an old session's
+    /// group is.
+    fn own_group(program: &str, args: &[&str]) -> (std::process::Child, i32) {
+        use std::os::unix::process::CommandExt as _;
+        let child = std::process::Command::new(program)
+            .args(args)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = i32::try_from(child.id()).unwrap();
+        (child, pgid)
+    }
+
+    fn end_group(mut child: std::process::Child, pgid: i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn a_resume_refused_for_the_old_group_leaves_the_pane_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let (child, pgid) = own_group("/bin/sleep", &["30"]);
+        let mut held = record("a", State::Held, None, &conversation_id());
+        held.pgid = Some(pgid);
+        held.boot_id = crate::service::boot_id();
+        put(&host, &held);
+        let fake = Fake::default();
+        let result = host.resume_on(&fake, "a", None).await;
+        end_group(child, pgid);
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("kill -- -{pgid}")),
+            "{error}"
+        );
+        assert!(
+            fake.killed.lock().unwrap().is_empty(),
+            "the pane was killed"
+        );
+        assert_eq!(host.load("a").unwrap(), held);
+    }
+
+    #[tokio::test]
+    async fn a_restart_waits_for_its_group_and_refuses_one_that_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let fake = Fake::default();
+
+        // A group that empties within the wait: the restart goes on.
+        let (mut child, pgid) = own_group("/bin/sleep", &["1"]);
+        let reaper = std::thread::spawn(move || child.wait());
+        let mut running = record("a", State::Running, None, &conversation_id());
+        running.pgid = Some(pgid);
+        running.boot_id = crate::service::boot_id();
+        put(&host, &running);
+        let restarted = host.restart_on(&fake, "a").await;
+        let _ = reaper.join();
+        let restarted = restarted.unwrap();
+        assert_eq!((restarted.state, restarted.launches), (State::Running, 2));
+
+        // A group that outlives the wait: refused after the pane ended,
+        // naming the restore that then holds the session.
+        let (child, pgid) = own_group("/bin/sleep", &["60"]);
+        let mut running = record("b", State::Running, None, &conversation_id());
+        running.pgid = Some(pgid);
+        running.boot_id = crate::service::boot_id();
+        put(&host, &running);
+        let result = host.restart_on(&fake, "b").await;
+        end_group(child, pgid);
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("kill -- -{pgid}")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("restore holds"), "{error}");
+        assert!(fake.killed.lock().unwrap().contains(&"kersh-b".to_owned()));
+        assert_eq!(host.load("b").unwrap(), running);
+    }
+
+    #[test]
+    fn a_held_record_does_not_own_its_old_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let script = tmp.path().join("claude");
+        std::fs::write(&script, "while :; do sleep 1; done\n").unwrap();
+        let conversation = conversation_id();
+        let (child, pgid) = own_group(
+            "/bin/sh",
+            &[script.to_str().unwrap(), "--resume", &conversation],
+        );
+        let mut held = record("a", State::Held, None, &conversation);
+        held.pgid = Some(pgid);
+        held.boot_id = crate::service::boot_id();
+        let as_held = host.check_conversation_free(Harness::ClaudeCode, &conversation, Some(&held));
+        let mut running = held.clone();
+        running.state = State::Running;
+        let as_running =
+            host.check_conversation_free(Harness::ClaudeCode, &conversation, Some(&running));
+        end_group(child, pgid);
+        let error = as_held.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("pid {pgid}")),
+            "{error}"
+        );
+        as_running.unwrap();
     }
 
     #[tokio::test]
