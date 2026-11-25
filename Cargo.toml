@@ -74,7 +74,7 @@ globset = "0.4"
 getrandom = "0.3"
 rig-core = { version = "0.41", default-features = false }
 rig = "0.41"
-rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "c0db1f69e630a2d2a27b276b8e41afdb77a1f938", version = "0.1.0" }
+rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "bf31a6b610a0d8f5ba6315d6930a793981c7ac68", version = "0.1.0" }
 clap = { version = "4.6", features = ["derive"] }
 # The terminal sessions, behind the `Sessions` trait in src/sessions.rs.
 # Pinned exactly: an upgrade is its own change with the gates rerun. The
