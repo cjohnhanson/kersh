@@ -566,6 +566,23 @@ fn systemd_without_a_user_manager_says_so() {
 }
 
 #[test]
+fn service_install_and_stop_without_a_user_manager_say_so() {
+    let env = env_with("systemd");
+    let first = env.kersh(&["service", "install"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    std::fs::write(env.home().join("no-bus"), "").unwrap();
+
+    let stop = env.kersh(&["service", "stop"]);
+    assert_eq!(stop.status.code(), Some(1), "{}", stderr(&stop));
+    says_no_user_manager(&stderr(&stop));
+
+    std::fs::remove_file(env.home().join(".config/systemd/user/kersh-host.service")).unwrap();
+    let install = env.kersh(&["service", "install"]);
+    assert_eq!(install.status.code(), Some(1), "{}", stderr(&install));
+    says_no_user_manager(&stderr(&install));
+}
+
+#[test]
 fn an_installed_systemd_unit_without_a_user_manager_says_so_once() {
     let env = env_with("systemd");
     let install = env.kersh(&["service", "install"]);

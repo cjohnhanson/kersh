@@ -75,7 +75,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 - **Every `Client` method has a command.** The command prints the same data as JSON lines with `--json`, so anything a linked program can do also works from a shell.
 - **rmux stays behind the `Sessions` interface, pinned `=0.10.0`.** An upgrade is its own change with the gate rerun.
 - **Every front end calls the same core.** `kersh serve`, REST on `host.sock`, and `kersh tui` call `Client` or the host's own methods, and answer the command's `--json` shapes. Nothing listens on TCP; `tests/rest.rs` holds it.
-- **No credential code.** Harnesses inherit the login environment; `claude-code/<model>` uses the Claude CLI's own sign-in, and rig's Anthropic provider reads its API key from the environment. Keep credential storage, creation, encryption, and enforcement out of kersh.
+- **No credential code.** `claude-code/<model>` uses the Claude CLI's own sign-in, and rig's Anthropic provider reads its API key from the environment. Keep credential storage, creation, encryption, and enforcement out of kersh.
 - **Sessions start from the login environment.** The host captures it once; the server, every pane, and every harness start from it, never from the caller's environment.
 - **Tests use fixtures.** No test, probe, or capture reads a real card, note, queue, or transcript; probes read ids and event types only.
 
