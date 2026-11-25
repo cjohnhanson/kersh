@@ -429,9 +429,12 @@ pub struct ServiceStatus {
     pub unit: Option<PathBuf>,
     /// The unit file exists and runs the host for this state directory.
     pub installed: bool,
-    /// The service manager has the unit: launchd has loaded it, or
-    /// systemd has it enabled. An installed unit that is not loaded
-    /// starts no host until `kersh service install` loads it again.
+    /// The service manager starts the unit at login: launchd has loaded
+    /// it, or systemd has it enabled. An installed launchd unit that is
+    /// not loaded starts no host at all; an installed systemd unit that
+    /// is not enabled does not start at login, and a client still starts
+    /// it with `systemctl --user start`. `kersh service install` loads
+    /// or enables it again.
     #[serde(default)]
     pub loaded: bool,
     /// This call wrote or removed the unit file.
@@ -465,15 +468,15 @@ pub fn status(manager: ServiceManager, paths: &Paths) -> ServiceStatus {
     let detail = match (&unit, installed) {
         (None, _) => "service_manager is none, so no unit starts the host".to_owned(),
         (Some(path), true) if loaded => format!("{UNIT} unit at {}", path.display()),
+        (Some(path), true) if manager == ServiceManager::Systemd => format!(
+            "{UNIT} unit at {} is not enabled, so it does not start at login; a client still \
+             starts it when no host runs; `kersh service install` enables it",
+            path.display()
+        ),
         (Some(path), true) => format!(
-            "{UNIT} unit at {}, but {} has not loaded it, so it starts no host; `kersh service \
-             install` loads it",
-            path.display(),
-            if manager == ServiceManager::Systemd {
-                "systemd"
-            } else {
-                "launchd"
-            }
+            "{UNIT} unit at {}, but launchd has not loaded it, so it starts no host; `kersh \
+             service install` loads it",
+            path.display()
         ),
         (Some(path), false) if path.exists() => format!(
             "{} runs a host for another state directory than {}",

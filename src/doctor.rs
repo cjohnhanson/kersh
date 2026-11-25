@@ -37,8 +37,9 @@ pub enum CheckState {
     Unguarded,
     /// Whether the guard runs cannot be confirmed.
     Unconfirmed,
-    /// The unit file is installed, and the service manager has not
-    /// loaded it.
+    /// The unit file is installed, and the service manager does not
+    /// start it at login: launchd has not loaded it, or systemd does not
+    /// have it enabled.
     Unloaded,
     /// The check does not apply to this configuration.
     NotApplicable,

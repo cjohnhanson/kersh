@@ -43,9 +43,34 @@ esac
 exit 0
 "#;
 
-/// A fake systemctl that records each call.
+/// A fake systemctl that records each call. `enable` and `disable` set
+/// and clear the enabled marker, which `is-enabled` answers from; with
+/// the masked marker, `start` and `restart` fail as systemd fails a
+/// masked unit; otherwise `start` and `restart` start the host named by
+/// `FAKE_KERSH` and `FAKE_STATE`, enabled or not, as systemd would.
 const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/systemctl.log"
+[ "$1" = --user ] && shift
+case "$1" in
+  enable) : > "$HOME/systemd-enabled" ;;
+  disable) rm -f "$HOME/systemd-enabled" ;;
+  is-enabled) [ -f "$HOME/systemd-enabled" ] || exit 1 ;;
+  start|restart)
+    [ -f "$HOME/systemd-masked" ] && { echo "Unit kersh-host.service is masked." >&2; exit 1; }
+    if [ -n "$FAKE_KERSH" ]; then
+      nohup "$FAKE_KERSH" host --state "$FAKE_STATE" >> "$HOME/fake-host.log" 2>&1 &
+    fi ;;
+esac
+exit 0
+"#;
+
+/// A fake systemd-run that records each call and runs the argv after
+/// `--` in the background, as a transient unit would.
+const FAKE_SYSTEMD_RUN: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/systemd-run.log"
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+nohup "$@" >> "$HOME/fake-job.log" 2>&1 &
 exit 0
 "#;
 
@@ -58,6 +83,7 @@ fn env_with(manager: &str) -> Env {
     .unwrap();
     write_exe(&env.bin().join("launchctl"), FAKE_LAUNCHCTL);
     write_exe(&env.bin().join("systemctl"), FAKE_SYSTEMCTL);
+    write_exe(&env.bin().join("systemd-run"), FAKE_SYSTEMD_RUN);
     env
 }
 
@@ -322,6 +348,94 @@ fn an_unloaded_unit_falls_back_to_a_one_shot_host() {
             .iter()
             .any(|call| call.starts_with("bootstrap ") && call.contains("kersh.host.")),
         "no one-shot host after the unit failed: {calls:?}"
+    );
+    assert!(err.contains("nosuch"), "the host did not answer: {err}");
+    assert_eq!(
+        err.matches("kersh service install").count(),
+        1,
+        "the fallback is not said once: {err}"
+    );
+}
+
+#[test]
+fn doctor_reports_a_systemd_unit_that_is_not_enabled() {
+    let env = env_with("systemd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    let state_home = env.state().parent().unwrap().to_path_buf();
+    assert_eq!(doctor_unit(&env, &state_home)["state"], "ok");
+
+    // Disabled outside kersh, as `systemctl --user disable` would leave it.
+    std::fs::remove_file(env.home().join("systemd-enabled")).unwrap();
+    let unit = doctor_unit(&env, &state_home);
+    assert_eq!(unit["state"], "unloaded", "{unit}");
+    let detail = unit["detail"].as_str().unwrap();
+    assert!(detail.contains("not enabled"), "{unit}");
+    assert!(detail.contains("does not start at login"), "{unit}");
+    assert!(detail.contains("kersh service install"), "{unit}");
+}
+
+/// Run `kersh stop nosuch` with the fakes able to start a host; the
+/// command's output and each fake's calls.
+fn client_run(env: &Env) -> (std::process::Output, Vec<String>, Vec<String>) {
+    let output = env
+        .command(&["stop", "nosuch"])
+        .env("FAKE_KERSH", env!("CARGO_BIN_EXE_kersh"))
+        .env("FAKE_STATE", env.state())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let systemctl = take(env, "systemctl");
+    let systemd_run = take(env, "systemd-run");
+    env.stop_host();
+    (output, systemctl, systemd_run)
+}
+
+#[test]
+fn a_systemd_unit_that_is_not_enabled_still_starts_the_host() {
+    let env = env_with("systemd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::remove_file(env.home().join("systemd-enabled")).unwrap();
+    take(&env, "systemctl");
+
+    let (output, systemctl, systemd_run) = client_run(&env);
+    let err = stderr(&output);
+    assert!(
+        systemctl.contains(&"--user start kersh-host.service".to_owned()),
+        "{systemctl:?}"
+    );
+    // The host starts the session server through systemd-run; only a
+    // host job there would be a one-shot host.
+    assert!(
+        !systemd_run
+            .iter()
+            .any(|call| call.contains(" host --state ")),
+        "a one-shot host beside the unit: {systemd_run:?}"
+    );
+    assert!(err.contains("nosuch"), "the host did not answer: {err}");
+    assert!(!err.contains("kersh service install"), "{err}");
+}
+
+#[test]
+fn a_systemd_unit_that_fails_to_start_falls_back_to_a_one_shot_host() {
+    let env = env_with("systemd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::write(env.home().join("systemd-masked"), "").unwrap();
+    take(&env, "systemctl");
+
+    let (output, systemctl, systemd_run) = client_run(&env);
+    let err = stderr(&output);
+    assert!(
+        systemctl.contains(&"--user start kersh-host.service".to_owned()),
+        "{systemctl:?}"
+    );
+    assert!(
+        systemd_run
+            .iter()
+            .any(|call| call.contains("--unit=kersh-host-") && call.contains(" host --state ")),
+        "no one-shot host after the unit failed: {systemd_run:?}"
     );
     assert!(err.contains("nosuch"), "the host did not answer: {err}");
     assert_eq!(

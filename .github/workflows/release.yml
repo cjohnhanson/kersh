@@ -11,9 +11,10 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
-  # A dry run, and only ever a dry run. Every build job runs, every
-  # publish job is skipped, and nothing is uploaded, so the whole matrix
-  # can be exercised before a tag exists.
+  # A dry run, and only ever a dry run. Every build job runs and every
+  # publish job is skipped. Artifacts stay in the run's own store and
+  # nothing leaves the run, so the whole matrix can be exercised before
+  # a tag exists.
   workflow_dispatch:
 
 # Least privilege at the top; each job widens only what it needs.

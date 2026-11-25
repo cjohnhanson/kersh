@@ -169,9 +169,11 @@ impl Client {
         }
         crate::paths::private_dir(&self.paths.state).map_err(failed)?;
         let manager = config.service_manager();
-        // An installed unit that does not start (launchd or systemd has
-        // not loaded it) falls back to a one-shot host. host.lock keeps a
-        // second host from running if the unit starts one later.
+        // An installed unit that does not start (launchd has not loaded
+        // it, or systemd refuses it) falls back to a one-shot host. A
+        // systemd unit that is only not enabled still starts here.
+        // host.lock keeps a second host from running if the unit starts
+        // one later.
         let unit_started = crate::service::installed_for(manager, &self.paths)
             && match crate::service::start_unit(manager) {
                 Ok(()) => true,
