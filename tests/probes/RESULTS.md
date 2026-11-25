@@ -1,4 +1,4 @@
-# kersh step 1: harness probes
+# Harness probes
 
 Run 2026-11-24 on macOS (Darwin 25.6.0). Claude Code 2.1.332 (`~/.local/bin/claude`), codex-cli 0.153.4, tmux (private server `tmux -L kprobe` as the pty for interactive runs), BSD `script -r` for the OSC recording. Ghostty 1.3.1 and WezTerm (nightly 2026-08-31) are installed.
 
@@ -105,7 +105,7 @@ Guard: one shell script, registered as a `PreToolUse` hook with matcher `Bash`; 
 Findings for guarded sessions:
 
 - **Codex runs `PreToolUse` hooks under `codex exec`** (previously undocumented), and exit 2 + stderr blocks the command. The block shows in `--json` only as a missing `command_execution` item; the reason goes to stderr's log.
-- **Codex skips an untrusted hook silently**: no event, no stderr line, and the command runs. Codex docs: "Non-managed hooks must be reviewed and trusted before they run"; project hooks load "only from trusted project layers". So rule 4's doctor check must test a hook *as registered by `gaff init`* (with its trust state), not just the presence of a hooks file; a registered-but-untrusted gaff hook leaves Codex unguarded with no visible sign.
+- **Codex skips an untrusted hook silently**: no event, no stderr line, and the command runs. Codex docs: "Non-managed hooks must be reviewed and trusted before they run"; project hooks load "only from trusted project layers". So any check that Codex is guarded must test a hook *as registered by `gaff init`* (with its trust state), not just the presence of a hooks file; a registered-but-untrusted gaff hook leaves Codex unguarded with no visible sign.
 - Codex docs list hook locations `/etc/codex/hooks.json`, `$CODEX_HOME/hooks.json`, trusted project `.codex/hooks.json`, and inline `[hooks]` in each layer's `config.toml`; hooks are on by default (`[features] hooks`, `codex features list`: `hooks stable true`).
 - Claude interactive: a project `.claude/settings.json` with hooks makes the trust dialog default to "No, exit" (see section 2).
 
@@ -130,4 +130,5 @@ Kitty-protocol terminals are installed: Ghostty 1.3.1 and WezTerm; kitty is not.
 - Raw stream files (`*.jsonl`), stderr captures (`*.err`), and both `script -r` recordings were deleted after extraction, as was a temporary copy of `~/.codex/config.toml` used to check it was not modified.
 - `tmux -L kprobe` server killed; `pgrep` for both conversation ids and the scratch path returns nothing.
 - No user config was edited by these probes, except that accepting Claude's trust dialog for the scratch folder recorded that folder's trust in Claude's own state. `~/.codex/config.toml` has no entry for the scratch path.
-- Kept in `probes/`: `fakeguard.sh`, `waitpane`, `osc7501.py`, `ce` (clean-env wrapper), the two driver scripts, `instr.md`, `fakeguard.log` (decision lines only), `claude-uuid`, `codex-tid`, and the scratch project with its hook files.
+- The repository keeps one probe file: `tests/probes/fakeguard.sh`, the guard from section 4. Its log, `tests/probes/fakeguard.log`, is ignored by git.
+- The other probe scripts (the pane waiter, the OSC record parser, the clean-environment wrapper, and the two drivers), the id files, and the scratch project were throwaway and are not in the repository.

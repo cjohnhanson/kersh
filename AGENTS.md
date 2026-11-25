@@ -36,7 +36,7 @@ The toolchain is pinned in `rust-toolchain.toml`. The suites also need
 1. Push the branch and open the pull request ready for review. `verify` and the test steps of `gate` are the CI-green signal; `gate` stays red until the note lands.
 2. One reader, an agent that did not write the change, reads the CI-green head beside its run against `.agents/skills/review-code/SKILL.md`. It adds a line for each other vendored criterion the change touches: `review-tests`, `review-docs`, `review-deps`, `review-usability`. Add a second reader only for auth, secrets, network exposure, or data loss.
 3. Fix every finding that breaks the goal, loses data, breaks execution, or leaves a gate red, with a test that failed first; decline the rest with a reason in the pull request. A new head needs a new round.
-4. Write one note on the head (`git notes --ref=reviews add -m '<lines>' <sha>`, lines `signoff[<review>] PASS <sha> <evidence>`), push `refs/notes/reviews`, and rerun `gate` and `review-gate`.
+4. Write one note on the head (`git notes --ref=reviews append -m '<lines>' <sha>`, which keeps lines already there; lines `signoff[<review>] PASS <sha> <evidence>`), push `refs/notes/reviews`, and rerun `gate` and `review-gate`.
 5. Merge with a squash once every required check is green.
 
 Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports drift.
