@@ -382,11 +382,52 @@ fn one_unreadable_record_does_not_stop_a_restore() {
     crash_and_restart(&env);
 
     env.wait_restored(&id, 1, "running");
+    // The watcher ticks many times; the bad file is named once.
+    std::thread::sleep(Duration::from_secs(2));
+    let log = env.host_log();
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("cccccccccccc/record.json"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains("fix or remove"), "{log}");
+}
+
+#[test]
+fn an_interactive_session_held_after_a_failure_resumes() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "exit3");
+    env.wait(&id, "held", |r| {
+        r["state"] == "held" && r["wrapper_pid"].is_i64() && r["pgid"].is_i64()
+    });
+    let output = env.kersh(&["resume", &id]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let record = env.running_with_pid(&id);
+    assert_eq!(record["launches"], 2);
+    assert_eq!(env.launches(&id).len(), 2);
+}
+
+#[test]
+fn a_restart_whose_old_group_outlives_the_wait_is_refused() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "survivor");
+    let before = env.running_with_pid(&id);
+    let survivor = env.survivor(&id);
+    let pgid = before["pgid"].as_i64().unwrap();
+
+    let output = env.kersh(&["restart", &id]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
-        env.host_log().contains("cccccccccccc/record.json"),
+        stderr(&output).contains(&format!("kill -- -{pgid}")),
         "{}",
-        env.host_log()
+        stderr(&output)
     );
+    assert!(alive(survivor));
+    // Refused after the pane ended: nothing launched, and the record is
+    // the running record it was until a restore finds its pane gone.
+    assert_eq!(env.launches(&id).len(), 1, "no new launch");
+    let after = env.record(&id);
+    assert_eq!(after["launches"], 1, "{after:#}");
 }
 
 #[test]

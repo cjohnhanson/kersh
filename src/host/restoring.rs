@@ -256,14 +256,36 @@ fn hold_message(record: &Record, why: &str, ret: Option<HeldRun>) -> String {
     text
 }
 
-/// The record's old process group, unless a reboot since then ended
-/// every process of it.
-pub(super) fn old_group(record: &Record) -> Option<i32> {
+/// The record's process group, unless a reboot since then ended every
+/// process of it.
+fn recorded_group(record: &Record) -> Option<i32> {
     let boot = crate::service::boot_id();
     if record.boot_id.is_some() && boot.is_some() && record.boot_id != boot {
         return None;
     }
     record.pgid
+}
+
+/// The recorded group when it is the current launch's: a running
+/// record's, or the group of the pane's live wrapper, as when a wrapper
+/// holds its own pane after a failure. Such a group empties when the
+/// pane ends.
+pub(super) fn current_group(record: &Record) -> Option<i32> {
+    let pgid = recorded_group(record)?;
+    let wrapper_group = record
+        .wrapper_pid
+        .and_then(rustix::process::Pid::from_raw)
+        .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
+        .map(|group| group.as_raw_nonzero().get());
+    (record.state == State::Running || wrapper_group == Some(pgid)).then_some(pgid)
+}
+
+/// The recorded group when it is an earlier launch's: a pane a restore
+/// holds runs no harness, so a process in that group is the old
+/// session's.
+pub(super) fn old_group(record: &Record) -> Option<i32> {
+    let pgid = recorded_group(record)?;
+    current_group(record).is_none().then_some(pgid)
 }
 
 /// Whether process group `pgid` empties within
@@ -563,6 +585,9 @@ impl Host {
                 record.state
             )));
         };
+        // A group of an earlier launch is checked with the pane still up;
+        // the current launch's group empties once its pane ends.
+        let current = current_group(&record);
         if let Some(pgid) = old_group(&record)
             && crate::restore::group_alive(pgid)
         {
@@ -582,6 +607,11 @@ impl Host {
             },
         };
         self.end_pane(&mux, &record).await?;
+        if let Some(pgid) = current
+            && !group_empties(pgid).await
+        {
+            return Err(old_group_runs(pgid));
+        }
         self.launch_again(&mux, &mut record, how, None).await
     }
 

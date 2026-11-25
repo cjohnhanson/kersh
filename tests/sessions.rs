@@ -24,13 +24,15 @@ const CODEX_STREAM: &str = include_str!("fixtures/codex-stream.jsonl");
 /// `fail` exits 4, `spawn` starts a child and waits for it, and `spam`
 /// exits 0 leaving a child that keeps printing. Interactive, the last
 /// argument decides: `exit0`, `exit3`, `hold` to wait as itself, or
-/// anything else to wait.
+/// anything else to wait. Each log file is written whole to a temp name
+/// and moved into place, so a test that polls for it never reads a part.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.999 (Claude Code)"; exit 0; fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
-env > "$log.env"
+printf '%s\n' "$@" | put "$log.args"
+env | put "$log.env"
 headless=0; sid=""; prev=""; last=""
 for a in "$@"; do
   [ "$a" = "-p" ] && headless=1
@@ -39,13 +41,13 @@ for a in "$@"; do
 done
 if [ "$headless" = 1 ]; then
   prompt=$(cat)
-  printf '%s' "$prompt" > "$log.stdin"
+  printf '%s' "$prompt" | put "$log.stdin"
   case "$prompt" in
     hang*) echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'; exec sleep 600 ;;
     fail*) echo "boom" >&2; exit 4 ;;
     spawn*)
       sleep 600 &
-      echo $! > "$log.child"
+      echo $! | put "$log.child"
       echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'
       wait; exit 0 ;;
     spam*) ( while :; do echo tick; sleep 0.5; done ) & exit 0 ;;
@@ -66,11 +68,12 @@ esac
 /// a rollout file open the way Codex's own process does, and waits.
 const FAKE_CODEX: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.999.0"; exit 0; fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
+printf '%s\n' "$@" | put "$log.args"
 if [ "$1" = "exec" ]; then
-  cat > "$log.stdin"
+  put "$log.stdin"
   cat "$HOME/codex-stream.jsonl"
   exit 0
 fi

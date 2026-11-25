@@ -32,15 +32,18 @@ pub const CODEX_STREAM: &str = include_str!("../fixtures/codex-stream.jsonl");
 /// to exit 0 after four seconds, `survivor` to leave a child in its
 /// process group that ignores HUP and TERM (its pid in
 /// `$HOME/fakelog/<session>.survivor`) and wait, or anything else to wait.
+/// Each log file is written whole to a temp name and moved into place, so
+/// a test that polls for it never reads a part of it.
 pub const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
   if [ -f "$HOME/claude-version" ]; then cat "$HOME/claude-version"; else echo "2.1.999 (Claude Code)"; fi
   exit 0
 fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
-env > "$log.env"
+printf '%s\n' "$@" | put "$log.args"
+env | put "$log.env"
 headless=0; sid=""; prev=""; last=""
 for a in "$@"; do
   [ "$a" = "-p" ] && headless=1
@@ -55,7 +58,7 @@ transcript() {
 }
 if [ "$headless" = 1 ]; then
   prompt=$(cat)
-  printf '%s' "$prompt" > "$log.stdin"
+  printf '%s' "$prompt" | put "$log.stdin"
   case "$prompt" in *notranscript*) ;; *) transcript ;; esac
   case "$prompt" in
     hang*) echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'; exec sleep 600 ;;
@@ -70,7 +73,7 @@ case "$last" in
   exitlater) echo "fake claude exits soon"; sleep 4; exit 0 ;;
   survivor)
     ( trap '' HUP TERM; exec sleep 600 ) </dev/null >/dev/null 2>&1 &
-    echo "$!" > "$HOME/fakelog/$KERSH_SESSION.survivor"
+    echo "$!" | put "$HOME/fakelog/$KERSH_SESSION.survivor"
     echo "fake claude waiting"; exec sleep 600 ;;
   *) echo "fake claude waiting"; exec sleep 600 ;;
 esac
@@ -80,11 +83,12 @@ esac
 /// a rollout file open the way Codex's own process does, and waits.
 pub const FAKE_CODEX: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.999.0"; exit 0; fi
+put() { cat > "$1.tmp" && mv "$1.tmp" "$1"; }
 mkdir -p "$HOME/fakelog"
 log="$HOME/fakelog/$KERSH_SESSION.$$"
-printf '%s\n' "$@" > "$log.args"
+printf '%s\n' "$@" | put "$log.args"
 if [ "$1" = "exec" ]; then
-  cat > "$log.stdin"
+  put "$log.stdin"
   cat "$HOME/codex-stream.jsonl"
   exit 0
 fi

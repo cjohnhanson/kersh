@@ -375,7 +375,9 @@ impl Host {
         if let Ok(mut logged) = self.unread.lock() {
             for (path, error) in &unread {
                 if !logged.contains(path) {
-                    eprintln!("kersh host: skipped an unreadable record: {error}");
+                    eprintln!(
+                        "kersh host: skipped an unreadable record; fix or remove the file: {error}"
+                    );
                 }
             }
             *logged = unread.into_iter().map(|(path, _)| path).collect();
@@ -914,20 +916,19 @@ impl Host {
         // Before the pane goes: a refused relaunch leaves the session as
         // it was.
         self.check_conversation_free(record.harness, &conversation.id, Some(&record))?;
-        let old_group = restoring::old_group(&record);
-        let running = record.state == State::Running;
-        // A pane that is not running holds no harness, so a process in
-        // the recorded group is the old session's, and the pane stays.
-        if !running
-            && let Some(pgid) = old_group
+        // A group of an earlier launch (a pane a restore holds runs no
+        // harness) is the old session's: it is checked, and the pane
+        // stays on a refusal. The current launch's group (a running
+        // harness, or a wrapper that held its own pane) empties once its
+        // pane ends.
+        let current = restoring::current_group(&record);
+        if let Some(pgid) = restoring::old_group(&record)
             && crate::restore::group_alive(pgid)
         {
             return Err(restoring::old_group_runs(pgid));
         }
         self.end_pane(mux, &record).await?;
-        // A running harness's group empties once its pane ends.
-        if running
-            && let Some(pgid) = old_group
+        if let Some(pgid) = current
             && !restoring::group_empties(pgid).await
         {
             return Err(restoring::old_group_runs(pgid));
