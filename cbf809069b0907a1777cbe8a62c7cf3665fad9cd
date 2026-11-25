@@ -1,0 +1,9 @@
+signoff[review-code] PASS cbf8090 round-3 independent reader read the rig paths in host.rs, restoring.rs, wrapper.rs, cli.rs and jsonl.rs against neighbours; rig restore checked against the pgid_launch group rules (held, RET relaunches); round-1 B1 (run refuses only a found non-rig runtime) holds
+
+signoff[review-tests] PASS cbf8090 round-2 minors and round-1 guards mutated red (hold texts, prompt-file message in situation_present, rig model refusal, non-rig runtime refusal, held argv); test.sh green locally; minors carried: run_inner message copy untested, running_rig wait adds no protection
+
+signoff[review-docs] PASS cbf8090 help snapshots, AGENTS.md, error strings and comments swept; no KERSH_FAKE_SCRIPT left; minor carried: --output help says a refused run writes only result, but a gaff session-start refusal writes init then result
+
+signoff[review-deps] PASS cbf8090 no manifest or lockfile change; a rig session runs kersh own entry argv
+
+signoff[review-usability] PASS cbf8090 cold wrong turns (no prompt, missing agent, --output json, prompt plus --prompt-file, missing prompt file) each refused with the fix named
