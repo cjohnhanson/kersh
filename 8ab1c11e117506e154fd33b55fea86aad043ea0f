@@ -1,0 +1,9 @@
+signoff[review-code] PASS 8ab1c11 round-4 independent reader read fold_note, end_pane, relaunch, check_conversation_free, wrapper pgid sources, restore_locked and held_return; group ownership is recorded (pgid_launch), not inferred; every case checked (running, self-held interactive and headless, restore-held with and without survivor, pre-field records, another boot, late notes, RET/resume/restart); rounds 1-3 blockers fixed and each verified by mutation
+
+signoff[review-tests] PASS 8ab1c11 six guards mutated (restore wait on the recorded group, pgid_launch clause, relaunch pre and post end_pane checks, held_return pre check, log dedupe), all red; scripts/test.sh green twice and restore suite 18/18 three times locally; fakes write args last via tmp+mv
+
+signoff[review-docs] PASS 8ab1c11 module steps and doc comments in restoring.rs match the code; pgid_launch documented; AGENTS.md layout accurate; user docs belong to step 6
+
+signoff[review-deps] PASS 8ab1c11 no manifest or lockfile change; no new spawned program
+
+signoff[review-usability] PASS 8ab1c11 every new refusal exits 1 and names kill -- -N; held RET and resume refusals leave the pane alone
