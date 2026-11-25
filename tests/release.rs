@@ -103,6 +103,249 @@ fn every_publish_job_runs_only_on_a_tag() {
     }
 }
 
+/// A job's or step's `if`, without the `${{ }}` wrapper.
+fn condition(value: &Value) -> Option<String> {
+    let text = value.get("if")?.as_str()?.trim();
+    let text = text
+        .strip_prefix("${{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+        .unwrap_or(text);
+    Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn needs(job: &Value) -> Vec<String> {
+    match job.get("needs") {
+        None => Vec::new(),
+        Some(Value::String(name)) => vec![name.clone()],
+        Some(list) => list
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect(),
+    }
+}
+
+/// The jobs that run for `event` when every job that runs succeeds, by
+/// GitHub's rules: a job without a status function in its `if` runs
+/// only when every job it needs, directly or not, succeeded; with
+/// `!cancelled()` it runs whatever they did. Only the conditions this
+/// workflow uses are read; any other fails the test, so a new one is
+/// modelled before it is trusted.
+fn jobs_that_run(workflow: &Value, event: &str) -> BTreeSet<String> {
+    fn ran(
+        workflow: &Value,
+        event: &str,
+        name: &str,
+        memo: &mut std::collections::BTreeMap<String, bool>,
+    ) -> bool {
+        if let Some(known) = memo.get(name) {
+            return *known;
+        }
+        let job = job(workflow, name);
+        let direct = needs(job);
+        let mut ancestors_ran = true;
+        for need in &direct {
+            ancestors_ran &=
+                ran(workflow, event, need, memo) && all_ancestors(workflow, need, event, memo);
+        }
+        let mut status_function = false;
+        let mut result = true;
+        if let Some(text) = condition(job) {
+            for clause in text.split("&&").map(str::trim) {
+                if clause == "!cancelled()" {
+                    status_function = true;
+                } else if clause == "github.event_name == 'push'" {
+                    result &= event == "push";
+                } else if let Some(rest) = clause.strip_prefix("needs.") {
+                    let need = rest
+                        .strip_suffix(".result == 'success'")
+                        .unwrap_or_else(|| panic!("job {name}: unread clause {clause:?}"));
+                    assert!(
+                        direct.iter().any(|d| d == need),
+                        "job {name}: {need} is not in needs"
+                    );
+                    result &= ran(workflow, event, need, memo);
+                } else {
+                    panic!("job {name}: unread clause {clause:?}");
+                }
+            }
+        }
+        if !status_function {
+            result &= ancestors_ran;
+        }
+        memo.insert(name.to_owned(), result);
+        result
+    }
+    fn all_ancestors(
+        workflow: &Value,
+        name: &str,
+        event: &str,
+        memo: &mut std::collections::BTreeMap<String, bool>,
+    ) -> bool {
+        needs(job(workflow, name)).iter().all(|need| {
+            ran(workflow, event, need, memo) && all_ancestors(workflow, need, event, memo)
+        })
+    }
+    let mut memo = std::collections::BTreeMap::new();
+    workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap().to_owned())
+        .filter(|name| ran(workflow, event, name, &mut memo))
+        .collect()
+}
+
+#[test]
+fn a_tag_runs_every_job() {
+    let workflow = workflow();
+    let all: BTreeSet<String> = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|name| name.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(jobs_that_run(&workflow, "push"), all);
+}
+
+#[test]
+fn a_dispatch_runs_every_build_and_packaging_job_and_no_publish_job() {
+    let ran = jobs_that_run(&workflow(), "workflow_dispatch");
+    let expected: BTreeSet<String> = [
+        "verify",
+        "build",
+        "wheels",
+        "sdist",
+        "npm-packages",
+        "debs",
+        "tap",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(ran, expected);
+}
+
+/// Whether a step sends anything outside the run: a release, a
+/// registry, a provenance attestation, or another repository.
+fn publishes(step: &Value) -> bool {
+    let run = step.get("run").and_then(Value::as_str).unwrap_or_default();
+    let action = step.get("uses").and_then(Value::as_str).unwrap_or_default();
+    [
+        "gh release",
+        "npm publish",
+        "cargo publish",
+        "uv publish",
+        "git push",
+    ]
+    .iter()
+    .any(|word| run.contains(word))
+        || action.starts_with("actions/attest-build-provenance")
+        || step
+            .get("with")
+            .and_then(|with| with.get("token"))
+            .is_some()
+}
+
+#[test]
+fn no_step_of_a_dispatch_publishes() {
+    let workflow = workflow();
+    let ran = jobs_that_run(&workflow, "workflow_dispatch");
+    let mut checked = 0;
+    for name in &ran {
+        for step in job(&workflow, name)["steps"].as_sequence().unwrap() {
+            if publishes(step) {
+                checked += 1;
+                let gate = condition(step).unwrap_or_default();
+                assert!(
+                    gate.split("&&")
+                        .any(|clause| clause.trim() == "github.event_name == 'push'"),
+                    "job {name}: a publishing step runs on a dispatch: {step:?}"
+                );
+            }
+        }
+    }
+    // build: attest, upload; debs: attach; tap: tap checkout, push.
+    assert_eq!(checked, 5);
+}
+
+fn step<'a>(job: &'a Value, name: &str) -> &'a Value {
+    job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step.get("name").and_then(Value::as_str) == Some(name))
+        .unwrap_or_else(|| panic!("no step {name:?}"))
+}
+
+#[test]
+fn the_tag_checks_run_on_every_tag_push() {
+    let workflow = workflow();
+    let verify = job(&workflow, "verify");
+    assert_eq!(condition(verify), None, "verify runs on every event");
+    for name in [
+        "Check the tag is on main",
+        "Check the tag matches Cargo.toml",
+    ] {
+        assert_eq!(
+            condition(step(verify, name)).as_deref(),
+            Some("github.event_name == 'push'"),
+            "{name}"
+        );
+    }
+    assert!(
+        step(verify, "Check the tag is on main")["run"]
+            .as_str()
+            .unwrap()
+            .contains("merge-base --is-ancestor")
+    );
+}
+
+#[test]
+fn the_build_runs_only_after_verify_passes() {
+    let workflow = workflow();
+    let build = job(&workflow, "build");
+    assert_eq!(
+        condition(build).as_deref(),
+        Some("!cancelled() && needs.verify.result == 'success'")
+    );
+    assert_eq!(
+        condition(step(build, "Attest the build provenance")).as_deref(),
+        Some("github.event_name == 'push'")
+    );
+}
+
+#[test]
+fn the_packaging_jobs_run_after_the_build_whatever_create_release_did() {
+    let workflow = workflow();
+    for name in ["npm-packages", "debs"] {
+        assert_eq!(
+            condition(job(&workflow, name)).as_deref(),
+            Some("!cancelled() && needs.build.result == 'success'"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_tap_pushes_only_after_every_publish() {
+    let workflow = workflow();
+    let tap = job(&workflow, "tap");
+    let gate = condition(step(tap, "Push the formula")).unwrap();
+    let clauses: BTreeSet<&str> = gate.split("&&").map(str::trim).collect();
+    let expected: BTreeSet<&str> = [
+        "github.event_name == 'push'",
+        "needs.publish-crate.result == 'success'",
+        "needs.publish-pypi.result == 'success'",
+        "needs.publish-npm.result == 'success'",
+        "needs.finalize.result == 'success'",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(clauses, expected);
+}
+
 #[test]
 fn the_tag_must_match_the_manifest_and_be_on_main() {
     let verify = scripts(job(&workflow(), "verify"));

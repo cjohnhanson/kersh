@@ -312,6 +312,9 @@ jobs:
 
   npm-packages:
     needs: build
+    # A dispatch skips create-release, which build needs, and a skipped
+    # indirect dependency skips this job without the explicit condition.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -384,8 +387,10 @@ jobs:
 
   debs:
     needs: build
-    # No job gate: a dispatch builds the packages and only a tag uploads
-    # them, so a rehearsal cannot report green while a tag fails here.
+    # A dispatch builds the packages and only a tag uploads them, so a
+    # rehearsal cannot report green while a tag fails here. The condition
+    # keeps the skipped create-release from skipping this job too.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
