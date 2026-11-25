@@ -266,8 +266,10 @@ struct RunArgs {
     #[arg(long, value_name = "DIR")]
     root: Option<PathBuf>,
     /// `text` prints the final answer only. `jsonl` prints one JSON event
-    /// per line for each turn, tool call, and tool result, and the result
-    /// with the final text last.
+    /// per line: `init` with the agent and model first, then `turn` for
+    /// each model turn, `text` for its text, `tool` for each tool call,
+    /// `tool_result` with its status (`success`, `error`, or `refused`),
+    /// and `result` with the final text last.
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = RunOutput::Text)]
     output: RunOutput,
     /// The agent file a session runs, instead of a store lookup.

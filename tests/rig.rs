@@ -489,7 +489,7 @@ fn a_rig_start_refuses_a_conversation_to_resume() {
             "start",
             "fixer",
             "--resume-conversation",
-            "abc",
+            "rig-has-no-such-conversation-7",
             "--prompt-file",
             "-",
         ],
