@@ -9,7 +9,7 @@ Run declarative agents. An agent file names a model, a skill and a gaff profile.
 - Append a skill's body to the system prompt.
 - Render before calling a model.
 - Limit model turns per run.
-- Confine shell commands to a root.
+- Run shell commands with the root as working directory.
 
 ## Installation
 
@@ -68,7 +68,7 @@ kersh check
 printf 'diff here\n' | kersh render reviewer --context-file - "hello"
 ```
 
-`kersh check` exits `1` if a file fails to load. Rendering shows the system prompt and first user turn, with context before the prompt. To review a diff:
+`kersh check` exits `1` if a file fails to load. Rendering shows the system prompt and first user turn, with context before the prompt. To use `claude-code/haiku` from the starter file, install `claude` locally and sign in through that CLI. To review a diff:
 
 ```sh
 git diff main...HEAD | kersh run reviewer --context-file - "review this diff"
@@ -80,11 +80,11 @@ The final answer goes to standard output. Use `kersh list` to list agents and `k
 
 ### Writing an agent file
 
-Set `name` to the directory name and give `description` one line for `kersh list`. rig reads `model` as `<provider>/<model>`: `claude-code/<model>` runs the local `claude` CLI, while `anthropic/<model>` uses an API key. You may omit `model` for an agent that uses only another harness. Only `op run` and the harness's login supply its credentials.
+Set `name` to the directory name and give `description` one line for `kersh list`. rig reads `model` as `<provider>/<model>`. `claude-code/<model>` runs the local `claude` CLI; `anthropic/<model>` uses an API key. You may omit `model` for an agent that uses only another harness. Each provider obtains credentials through environment variables; a session inherits the variables captured from your login shell. kersh does not store, mint, encrypt, or enforce credentials.
 
-Write the agent's identity in the body, which becomes its system prompt. Keep the situation out of this file; the caller and profile supply it at run time. A `profile` contains context, guards and a stop rule. If you declare one, gaff governs the run; without one, the run is ungoverned. The agent's only tool is a shell confined to the run's root, with commands governed by the profile.
+Write the agent's identity in the body, which becomes its system prompt. Keep the situation out of this file; the caller and profile supply it at run time. A `profile` contains context, guards and a stop rule. With a profile, tool calls pass through `gaff hook`; without one, the agent is unrestricted. For shell commands, the tool starts `sh -c` in the root directory.
 
-almanac holds skills. When you set `skill`, kersh resolves it through almanac, appends the skill's body to the system prompt and aborts the run if the skill cannot be resolved. rig enforces `max_turns`, the most model turns a run may take, while `timeout` sets the deadline for each model call.
+almanac holds skills. When you set `skill`, kersh resolves it through almanac and appends its body to the system prompt. If resolution fails, the run aborts. rig enforces `max_turns`, the most model turns a run may take, while `timeout` sets the deadline for each model call.
 
 To choose how and where an agent runs, name a runtime in its `runtime` field. These presets live in `~/.config/kersh/runtimes.yml`. Settings apply in order: kersh's defaults, the runtime the agent names, the agent's own fields, `--runtime`, then individual flags. Later layers override earlier settings, but can only replace a `profile`, never remove it.
 
@@ -121,9 +121,9 @@ With `--group` and `--max-running`, starts at the group's limit exit `3`.
 
 ### Keeping sessions running
 
-The host is the single writer of session records, one per user. Writes start it automatically by default; `kersh ps`, `kersh events`, and `kersh screen` work without it. `kersh host` runs it in the foreground.
+The host alone writes session records, one host per user. Session changes start it automatically by default: `start`, `stop`, `resume`, `restart`, and `rm`. `kersh ps`, `kersh events`, and `kersh screen` work without it. `kersh host` runs it in the foreground.
 
-The session server supplies terminals. The host captures a fresh login shell's variables as the login environment, then starts sessions with it. None come from the caller. A session is lost when its pane disappears while its record remains `running` or `lost`. The host restores sessions at startup and when its watcher detects a missing server or pane.
+The session server supplies terminals. The host captures a fresh login shell's variables as the login environment for sessions. None come from the caller. A pane can vanish without an exit note, leaving its record `running` or `lost`. The host restores sessions at startup and when a server or pane disappears.
 
 Install the `kersh-host` unit to start the host at login:
 
@@ -147,7 +147,7 @@ To expose commands through MCP on stdio, run:
 kersh serve
 ```
 
-These front ends and REST on `host.sock` use the same calls, with `GET /openapi.json` describing REST. Every `Client` method has a shell command; `--json` prints the same data, one JSON object per line. Commands send results to standard output and errors to standard error. Exit codes are `0` for success, `1` for failure, `2` for usage errors, and `3` at a group limit.
+These front ends and REST share calls through `Client`, kersh's library interface. REST uses `$XDG_STATE_HOME/kersh/host.sock` (default `~/.local/state/kersh/host.sock`); `GET /openapi.json` describes it. Each `Client` method has a command; `--json` returns matching JSON objects, one per line. Results use standard output; errors use standard error. Exit codes: `0` for success; `2` for usage errors refused before acting; `1` for other failures, including `kersh run` without a prompt; `3` at a group limit.
 
 ### Checking this machine
 
@@ -157,15 +157,15 @@ Check the installation against your login environment:
 kersh doctor
 ```
 
-`kersh doctor` reports harnesses, host, session server, the `kersh-host` unit, gaff and its hooks, guards for each harness and mode, and eng.rip tools without writing anything. It requires kersh and gaff on login `PATH`, gaff hooks for detected harnesses, and a running host or session server matching kersh's version, exiting `1` if a required piece is missing.
+It reports harnesses, host, session server, the `kersh-host` unit, hooks and guards without writing. Optional checks cover zettel memory, almanac skills, tisket tasks and plans, tundish delivery, and their configuration. Required: kersh and gaff on login `PATH`, plus hooks for detected harnesses. Running hosts and session servers must match this kersh's version. Missing requirements mean exit `1`.
 
 With `kersh setup claude-code` or `kersh setup codex`, you register gaff hooks and check wiring. Missing pieces produce exit `1`.
 
 ## Integration with gaff
 
-Tool calls and stops go through the `gaff hook` executable, which kersh runs with `GAFF_HOST=generic`. The operator must permit the profile in `transitions.agent_may_set` before gaff accepts selection through `GAFF_PROFILE`. gaff refuses a tool call or stop with exit `2` and a reason on standard error.
+With a profile, kersh sends tool calls and stops through `gaff hook`, using `GAFF_HOST=generic`. The operator must permit the profile in `transitions.agent_may_set` before gaff accepts selection through `GAFF_PROFILE`. gaff refuses a tool call or stop with exit `2` and a reason on standard error.
 
-Context injection uses standard output at a flush point. kersh flushes only at session start, so gaff cannot inject context mid-run.
+A flush point is when gaff injects context through standard output. kersh flushes only at session start, so gaff cannot inject context mid-run.
 
 For hook agents, gaff clears the environment, strips `PATH` and runs `kersh run <name> --context-file -`. The final answer on stdout gives gaff its verdict.
 

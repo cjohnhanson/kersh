@@ -30,9 +30,9 @@ Use the bash tool to read files: cat, ls, rg, git diff, and so on.
 
 `name` must match the directory while `description` appears in `kersh list`. A harness runs your agent: built-in `rig`, Claude Code (`claude-code`) or Codex (`codex`). For rig the `model` field takes `<provider>/<model>`, which agents running only on another harness can omit.
 
-`runtime` names the default preset for how and where execution happens. A gaff `profile` carries context, guards and a stop rule. gaff registers and runs guards. If you specify `skill`, kersh appends that almanac skill's body to the system prompt using `KERSH_ALMANAC` (default `almanac`) to resolve it and aborting execution if resolution fails.
+`runtime` names the default execution preset. A gaff `profile` carries context, guards and a stop rule. gaff registers and runs guards. If you specify `skill`, kersh appends the almanac skill's body to the system prompt. It resolves skills through `KERSH_ALMANAC` (default `almanac`) and aborts if resolution fails.
 
-rig enforces the `max_turns` limit on model turns while `timeout` sets each model call's deadline using bare seconds or a duration such as `120s` or `2m`. The body defines identity through the system prompt; the caller and profile supply the situation at run time.
+rig limits model turns to `max_turns`. Each model call has a `timeout` deadline, expressed as bare seconds or a duration such as `120s` or `2m`. The body defines identity through the system prompt; the caller and profile supply the situation at run time.
 
 A root contains `kersh.yml` and the nearest root up the tree is active. Nearer roots win name collisions with `~/.config/kersh/agents/` as the fallback. For `list`, `show`, `check`, `render` and `run`, `--root` selects a root; for `init` it selects the creation directory.
 
@@ -50,13 +50,13 @@ A pipe alone supplies no input: use `--context-file -` for context or `--prompt-
 
 kersh wraps context in a per-run marker to deny it instruction authority. Before constructing child-process arguments, it validates model strings so embedded options cannot execute hooks.
 
-`kersh run` uses rig with the provider selected by the `model` prefix: `claude-code/<model>` uses your local `claude` CLI and Claude subscription while `anthropic/<model>` uses rig's Anthropic provider with an API key.
+`kersh run` uses rig. The `model` prefix selects the provider: `claude-code/<model>` uses the local `claude` CLI and your subscription; `anthropic/<model>` uses an API key.
 
-For `run`, `--root` selects the root and working directory (default: your current directory). The agent has only the `bash` tool with a `30`-second deadline and `64 KiB` output cap, confined to that root under the profile's command rules. If the runtime selects another harness, `run` exits `1` and directs you to `kersh start`.
+`run --root` selects the working directory, defaulting to the current directory. Its `bash` tool executes `sh -c` there, with a `30`-second deadline and `64 KiB` output cap. A `profile` routes calls through `gaff hook`; without one, commands are unrestricted. If the runtime selects another harness, `run` exits `1` and directs you to `kersh start`.
 
 ## Sessions
 
-The host is the sole writer of session records for each user and serializes changes and exit recording under its lock. A session runs a harness in a terminal pane managed by the session server in a separate rmux process that keeps agents running across host restarts.
+The host is each user's sole writer of session records, serializing changes and exit recording under its lock. A session runs a harness in a terminal pane. The session server manages panes in a separate rmux process, keeping agents running across host restarts.
 
 `kersh host` runs in the foreground and starts a missing session server. At startup the host captures a fresh login shell's variables once as the login environment, which sessions inherit instead of the invoking process's variables. `kersh ps`, `events` and `screen` read files and the session server without the host.
 
@@ -111,7 +111,7 @@ kersh screen <id> --follow
 
 ### Restoring sessions
 
-You can continue a `held` or `ended` conversation in a new pane with `resume`, supplying `--prompt-file` with a path or `-` for stdin when the session is headless. `restart` restarts an interactive session on its conversation:
+Use `resume` to continue a `held` or `ended` conversation in a new pane. Headless sessions require `--prompt-file` with a path or `-` for stdin. For an interactive session, `restart` restarts it on its conversation:
 
 ```sh
 kersh resume <id> --prompt-file task.txt
@@ -146,7 +146,7 @@ kersh runtime list
 kersh runtime show worker
 ```
 
-With `local` as the only available `environment`, runtimes accept `harness`, `mode` and `model` alongside `profile` for governance and `resume_prompt` for interactive resume where the harness accepts it. `tempdir` supplies a temporary directory retained with the session record while literal session variables go in `env` and harness options go in `flags`.
+Runtime fields `harness`, `mode` and `model` select execution settings; `environment` accepts only `local`. The `profile` field selects governance, and `resume_prompt` supplies interactive resume input where the harness accepts it. `tempdir` keeps a temporary directory with the session record. Use `env` for literal session variables and `flags` for harness options.
 
 To prevent changes to harness configuration, hooks or code loading, runtime `env` rejects these prefixes and names:
 
@@ -156,9 +156,9 @@ To prevent changes to harness configuration, hooks or code loading, runtime `env
 
 The prefix rule also covers future variables in those families. Although these restrictions guard against misconfiguration, they do not constrain other programs an agent can start as your user.
 
-Harness flags after `--` and runtime `flags` must pass a per-harness allow-list that denies unlisted options. It excludes options that skip or replace gaff hooks: Claude Code's `--bare`, `--setting-sources` and `--settings` (kersh composes settings) plus Codex's `--dangerously-bypass-hook-trust`, `--enable`, `--disable` and `-c` keys under `features` or `hooks`.
+Harness flags after `--` and runtime `flags` must pass a per-harness allow-list that denies unlisted options. Options that skip or replace gaff hooks are excluded. For Claude Code these include `--bare`, `--setting-sources` and `--settings` (kersh composes settings). For Codex they include `--dangerously-bypass-hook-trust`, `--enable`, `--disable` and `-c` keys under `features` or `hooks`.
 
-Credentials reach a harness only through `op run` or the harness's own login. kersh does not store, mint, encrypt or enforce them.
+rig's Anthropic client gets its API key through environment variables. Harnesses inherit the login environment; kersh provides no credential storage, creation, encryption or enforcement.
 
 ## Configuration
 
@@ -172,18 +172,18 @@ State lives in `$XDG_STATE_HOME/kersh/` with `~/.local/state/kersh/` as the defa
 
 ## Host service
 
-`kersh service install` writes and loads the `kersh-host` unit in `~/Library/LaunchAgents` (launchd) or `~/.config/systemd/user` (systemd) to run now and at login with restore. Identical reinstallation changes nothing; `kersh service stop` stops and removes it while sessions continue:
+`kersh service install` writes then loads the `kersh-host` unit in `~/Library/LaunchAgents` (launchd) or `~/.config/systemd/user` (systemd), starting now and at login with restore. Identical reinstalls change nothing. `kersh service stop` removes the unit; sessions continue:
 
 ```sh
 kersh service install
 kersh service stop
 ```
 
-In `config.yml`, `service_manager` defaults to macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`. With default `auto_start: true`, writes start an absent host through its installed unit or a one-shot launchd job, transient systemd unit or detached process if none is installed. These survive terminal closure.
+`config.yml` defaults: `service_manager` is macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`; `auto_start` is `true`. Writes start missing hosts through installed units. Otherwise launchd jobs, transient systemd units or detached processes survive terminal closure. With `none`, installation fails with exit `1`; select `launchd` or `systemd`.
 
 ## Governance with gaff
 
-When you declare a `profile`, kersh runs under gaff; without one it runs ungoverned. Before a profiled start, kersh checks that gaff knows the profile, that the harness and mode run its hooks and that registration matches the harness's settings location. Missing or broken gaff aborts execution. `KERSH_GAFF` selects the binary (default `gaff` on `PATH`).
+With a `profile`, kersh runs under gaff; without one it runs ungoverned. Before starting, kersh checks that gaff knows the profile and the harness and mode run its hooks. It also checks registration at the harness's settings location. Missing or broken gaff aborts execution. `KERSH_GAFF` selects the binary (default `gaff` on `PATH`).
 
 Register hooks for your harness with `setup`:
 
@@ -194,7 +194,7 @@ kersh setup codex
 
 `setup` runs `gaff init --host <harness>` and checks the wiring before exiting `1` if a piece is missing. gaff writes registration without kersh writing any harness settings or hook files.
 
-For rig kersh calls `gaff hook` with `GAFF_HOST=generic` and selects `profile` through `GAFF_PROFILE`. You must permit the profile under `transitions.agent_may_set` in `gaff.yml`. Without configuration gaff itself does nothing. gaff refuses a tool call or stop with exit `2` and a reason on stderr. At a flush point it injects context on stdout.
+For rig kersh calls `gaff hook` with `GAFF_HOST=generic` and selects `profile` through `GAFF_PROFILE`. Permit the profile under `transitions.agent_may_set` in `gaff.yml`. Without configuration gaff itself does nothing. gaff refuses a tool call or stop with exit `2` and a reason on stderr. At kersh's session-start flush point, it injects context on stdout.
 
 gaff base guards for Claude Code's `Bash` tool and `command` field also guard kersh's `bash`, which sends the same payload shape. Guards for other tool names do not apply. kersh flushes only at session start, so gaff cannot inject context mid-run.
 
@@ -202,7 +202,7 @@ gaff hook agents invoke `kersh run <name> --context-file -` with a cleared envir
 
 ## Agent memory
 
-`kersh memories` produces a gaff-injected block capped at `4,000` bytes by retrieving notes tagged `agent-memory` or `agent-memory-processed` through `zettel note list --format json` without opening note files. If you need another store, `--root` overrides the configured `memory.root`:
+`kersh memories` retrieves notes tagged `agent-memory` or `agent-memory-processed` through `zettel note list --format json`. It produces a gaff-injected block capped at `4,000` bytes without opening note files. If you need another store, `--root` overrides the configured `memory.root`:
 
 ```sh
 kersh memories --root <DIR>
@@ -216,20 +216,21 @@ The `check --json` summary counts agents and problems, with `roots` ordered from
 
 ```sh
 $ kersh check --json
+{"kind":"summary","agents":1,"problems":0,"ok":true,"roots":[...]}
 ```
 
-`run --output text` (default) prints only the final answer while `jsonl` prints one JSON line per turn, tool call, tool result and assistant text before the result with final text. Results use stdout and errors use stderr.
+`run --output text` defaults to final-answer output. With `jsonl`, each turn, tool call, tool result and assistant text gets a JSON line; the final result comes last. Results use stdout; errors use stderr.
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Failure |
-| `2` | Usage error |
-| `3` | Limit reached |
+| `1` | Other failure |
+| `2` | CLI parsing or session usage error |
+| `3` | Group limit reached |
 
 kersh command exit codes.
 
-Unknown subcommands return `2` while starts at a group's `--max-running` limit return `3`.
+Unknown subcommands and session usage errors return `2`; missing input to `kersh run <agent>` returns `1`. Group limits return `3`.
 
 ## Machine checks
 
@@ -240,7 +241,7 @@ kersh doctor
 kersh harness list
 ```
 
-Against the login environment, `doctor` checks harnesses and their guards in each mode, the host and session server, the `kersh-host` unit, gaff hooks and eng.rip tools. It requires `kersh` and `gaff` on login `PATH`, hooks for detected harnesses and a running host or session server matching this kersh version.
+`doctor` checks harnesses, guards, host, session server, `kersh-host` unit and gaff hooks against the login environment. It requires `kersh` and `gaff` on login `PATH` and hooks for detected harnesses. Running hosts and session servers must match this kersh's version. Optional eng.rip checks cover zettel memory, almanac skills, tisket tasks and plans, tundish delivery, and their configuration.
 
 If pieces marked `required` are missing, it exits `1`. Checks read files and run `--version` without writes; `--json` identifies each check:
 
