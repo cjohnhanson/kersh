@@ -1,0 +1,6 @@
+Serve the session and agent commands over MCP on stdio
+
+Usage: kersh serve
+
+Options:
+  -h, --help  Print help

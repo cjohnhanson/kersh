@@ -101,6 +101,13 @@ pub enum SessionCmd {
     RuntimeList {
         json: bool,
     },
+    RuntimeShow {
+        name: String,
+        json: bool,
+    },
+    Serve,
+    #[cfg(feature = "tui")]
+    Tui,
     Setup {
         harness: Harness,
         json: bool,
@@ -184,6 +191,16 @@ fn parse_labels(labels: &[String]) -> Result<BTreeMap<String, String>, SessionEr
         map.insert(key.to_owned(), value.to_owned());
     }
     Ok(map)
+}
+
+/// Indent each line by two spaces, as a runtime sits in runtimes.yml.
+fn indent(text: &str) -> String {
+    text.lines().fold(String::new(), |mut out, line| {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+        out
+    })
 }
 
 fn print_record(record: &Record, json: bool) {
@@ -361,6 +378,27 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
             }
             Err(error) => report(&error),
         },
+        SessionCmd::RuntimeShow { name, json } => match client().runtime_show(&name) {
+            Ok(entry) => {
+                if json {
+                    json_line(&entry);
+                } else {
+                    match serde_yaml_ng::to_string(&entry.runtime) {
+                        Ok(yaml) => print!("{}:\n{}", entry.name, indent(&yaml)),
+                        Err(error) => return fail(&error.to_string()),
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => report(&error),
+        },
+        SessionCmd::Serve => {
+            crate::serve::run().map_or_else(|error| fail(&error), |()| ExitCode::SUCCESS)
+        }
+        #[cfg(feature = "tui")]
+        SessionCmd::Tui => {
+            crate::tui::run().map_or_else(|error| fail(&error), |()| ExitCode::SUCCESS)
+        }
         SessionCmd::Setup { harness, json } => match client().setup(harness) {
             Ok(report) => {
                 for item in &report.items {

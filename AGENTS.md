@@ -13,6 +13,8 @@ The toolchain is pinned in `rust-toolchain.toml`. The suites also need
 | Every suite, as CI does | `sh scripts/test.sh` |
 | One unit or integration test | `cargo test --all-features <name>` |
 | Help snapshots after a help-text change | `KERSH_UPDATE_SNAPSHOTS=1 cargo test --all-features --test help` |
+| TUI snapshots after a screen change, then read the diff | `INSTA_UPDATE=always cargo test --all-features --lib tui::` |
+| A build without the TUI | `cargo build --no-default-features` |
 | The missouri suite | `cd tests/missouri && missouri run` |
 | Install the commit and merge gates in a clone | `gaff init --git` |
 | Regenerate the CI workflows after editing `.gaff/gaff.yml` | `gaff init --github` |
@@ -49,7 +51,10 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/client.rs` | `kersh::Client`, the library API; every method has a command with the same JSON |
 | `src/agent.rs`, `src/store.rs` | agent files and their roots |
 | `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs`, `src/jsonl.rs` | rig, the built-in harness, its gaff governance, and the `kersh run --output jsonl` stream a rig session reads |
-| `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol, each with a schema number |
+| `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol (HTTP, the `kersh-schema` header), each with a schema number |
+| `src/host/rest.rs` | REST on `host.sock`: the routes, their handlers, and the OpenAPI document (utoipa) served at `/openapi.json` |
+| `src/serve.rs` | `kersh serve`, the MCP server on stdio (rmcp); one tool per command an agent can use without a terminal |
+| `src/tui/` | `kersh tui` (ratatui, the `tui` feature): the keymap sections over mdstore-core's presets, the app state behind a `Calls` trait, drawing, and TestBackend snapshots |
 | `src/host.rs`, `src/wrapper.rs`, `src/mux.rs`, `src/service.rs` | the host (single writer), the pane wrapper and its exit cases, the rmux server and attach client, and how the host and server start |
 | `src/host/restoring.rs`, `src/restore.rs` | restore of lost sessions, held panes and RET, screen captures, `restart --mux`; the name-only transcript and rollout checks and the 30-day prune |
 | `src/harness.rs`, `src/runtime.rs`, `src/login_env.rs`, `src/guard.rs`, `src/discover.rs` | launch argv and the flag allow-list per harness, runtimes and settings order, the login environment, profile checks, and the process table: Codex conversation discovery and the check that no other harness process runs a conversation |
@@ -58,6 +63,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `tests/sessions.rs`, `tests/fixtures/` | sessions end to end: a real session server on a temp socket, fake `claude` and `codex` scripts, canned streams |
 | `tests/restore.rs`, `tests/support/` | restore end to end: `kill -9` of the server, one vanished session, `restart --mux`, on the same kind of harness |
 | `tests/rig.rs` | rig end to end through the fake model: `--output jsonl`, the refusal of another harness, rig sessions, their limits and restore |
+| `tests/mcp.rs`, `tests/rest.rs` | the front ends end to end on the same harness: MCP over stdio, REST and its OpenAPI document over `host.sock`, and no TCP listener in any process |
 | `tests/help.rs`, `tests/snapshots/help/` | `--help` snapshots for every command |
 | `tests/missouri/` | state-transition suites; `gaff-runner` holds gaff's hook-agent contract |
 | `tests/probes/` | probes of real harnesses; they need network and a signed-in harness, so no gate runs them |
@@ -68,6 +74,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 - **kersh knows nothing about cards.** Labels are stored and echoed, never interpreted; no code reads or writes a card.
 - **Every `Client` method has a command.** The command prints the same data as JSON lines with `--json`, so anything a linked program can do also works from a shell.
 - **rmux stays behind the `Sessions` interface, pinned `=0.10.0`.** An upgrade is its own change with the gate rerun.
+- **Every front end calls the same core.** `kersh serve`, REST on `host.sock`, and `kersh tui` call `Client` or the host's own methods, and answer the command's `--json` shapes. Nothing listens on TCP; `tests/rest.rs` holds it.
 - **No credential code.** Credentials reach a harness only through `op run` and the harness's own login; kersh stores, mints, encrypts, and enforces none.
 - **Sessions start from the login environment.** The host captures it once; the server, every pane, and every harness start from it, never from the caller's environment.
 - **Tests use fixtures.** No test, probe, or capture reads a real card, note, queue, or transcript; probes read ids and event types only.

@@ -38,6 +38,8 @@ Sessions (rig, Claude Code, and Codex, hosted in a terminal session):
   kersh send <id> --prompt-file <path|->
   kersh stop|resume|restart|rm <id>
   kersh stop $KERSH_SESSION  (an agent ends its own session when its task is done)
+Front ends over the same calls: kersh serve (MCP on stdio), kersh tui, and REST
+on the host's socket, host.sock (GET /openapi.json describes it).
 ";
 
 const DOCS: &str = include_str!("../docs/kersh.md");
@@ -210,7 +212,7 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Write and list runtimes in runtimes.yml.
+    /// Write, list, and show runtimes in runtimes.yml.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
@@ -229,6 +231,11 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
+    /// Serve the session and agent commands over MCP on stdio.
+    Serve,
+    /// Browse and drive sessions in a terminal UI.
+    #[cfg(feature = "tui")]
+    Tui,
     /// Run the session host in the foreground.
     Host {
         #[arg(long, value_name = "DIR", hide = true)]
@@ -385,6 +392,13 @@ enum RuntimeCommand {
     },
     /// List every runtime.
     List {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Print one runtime's fields.
+    Show {
+        /// The runtime's name.
+        name: String,
         #[command(flatten)]
         json: JsonArg,
     },
@@ -569,7 +583,14 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
         Command::Runtime { command } => match command {
             RuntimeCommand::Add { name, file } => S::RuntimeAdd { name, file },
             RuntimeCommand::List { json } => S::RuntimeList { json: json.json },
+            RuntimeCommand::Show { name, json } => S::RuntimeShow {
+                name,
+                json: json.json,
+            },
         },
+        Command::Serve => S::Serve,
+        #[cfg(feature = "tui")]
+        Command::Tui => S::Tui,
         Command::Setup { harness, json } => S::Setup {
             harness,
             json: json.json,
