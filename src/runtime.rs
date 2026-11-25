@@ -226,7 +226,8 @@ pub fn check_env_key(key: &str) -> Result<(), String> {
             .collect();
         return Err(format!(
             "{key} is reserved: a runtime may not set {} variables, which change how a harness \
-             loads its config or hooks; remove it from the runtime's env",
+             loads its config, hooks, or code, or how its pane draws colours; remove it from \
+             the runtime's env",
             families.join(", ")
         ));
     }

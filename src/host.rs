@@ -257,6 +257,23 @@ fn fold_note(current: &mut Record, note: Note) {
     }
 }
 
+/// Whether conversation `id` is free, from the process-table search for
+/// a holder. A table that cannot be read refuses: kersh never starts a
+/// second harness on a conversation it cannot see.
+fn holder_verdict(id: &str, holder: Result<Option<i32>, String>) -> Result<(), SessionError> {
+    match holder {
+        Ok(None) => Ok(()),
+        Ok(Some(pid)) => Err(SessionError::failed(format!(
+            "another process (pid {pid}) already runs conversation {id}; \
+             stop that process or pick another conversation"
+        ))),
+        Err(error) => Err(SessionError::failed(format!(
+            "cannot tell whether another process runs conversation {id}: {error}; \
+             check that `ps` runs for this user, then run the command again"
+        ))),
+    }
+}
+
 /// Read a session's note, if its wrapper wrote one.
 fn read_note(paths: &Paths, id: &str) -> Option<Note> {
     std::fs::read_to_string(paths.note(id))
@@ -927,16 +944,7 @@ impl Host {
                 pgid: record.pgid,
             })
             .unwrap_or_default();
-        match crate::discover::holder(harness.program(), id, &own) {
-            Ok(None) => Ok(()),
-            Ok(Some(pid)) => Err(SessionError::failed(format!(
-                "another process (pid {pid}) already runs conversation {id}; \
-                 stop that process or pick another conversation"
-            ))),
-            Err(error) => Err(SessionError::failed(format!(
-                "cannot tell whether another process runs conversation {id}: {error}"
-            ))),
-        }
+        holder_verdict(id, crate::discover::holder(harness.program(), id, &own))
     }
 
     /// The environment of a relaunch: the last launch's, which already
@@ -1242,6 +1250,16 @@ mod tests {
         let error = host.stop_on(&fake, "a").await.unwrap_err();
         assert!(error.to_string().contains("unreachable"), "{error}");
         assert_eq!(host.load("a").unwrap(), running);
+    }
+
+    #[test]
+    fn a_process_table_that_cannot_be_read_refuses_the_conversation() {
+        holder_verdict("c", Ok(None)).unwrap();
+        let held = holder_verdict("c", Ok(Some(42))).unwrap_err();
+        assert!(held.to_string().contains("pid 42"), "{held}");
+        let unread = holder_verdict("c", Err("no ps".to_owned())).unwrap_err();
+        assert!(unread.to_string().contains("no ps"), "{unread}");
+        assert!(unread.to_string().contains("`ps` runs"), "{unread}");
     }
 
     #[test]

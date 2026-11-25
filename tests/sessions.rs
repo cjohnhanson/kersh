@@ -817,6 +817,14 @@ fn relaunch_over_a_holder_s_old_pids(
         assert!(env.kersh(&["stop", &other]).status.success());
     }
     edit_record(&env, &holder, |r| r["state"] = "ended".into());
+    // The host folds a wrapper's note into its record and would undo the
+    // edit below; a note of an older launch changes nothing.
+    let note = env.state().join("sessions").join(&other).join("note.json");
+    if let Ok(text) = std::fs::read_to_string(&note) {
+        let mut value: Value = serde_json::from_str(&text).unwrap();
+        value["launch"] = 0.into();
+        std::fs::write(&note, serde_json::to_string(&value).unwrap()).unwrap();
+    }
     edit_record(&env, &other, |r| {
         r["conversation"]["id"] = uuid.clone().into();
         r["wrapper_pid"] = holder_wrapper;
