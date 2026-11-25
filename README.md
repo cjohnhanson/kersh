@@ -80,7 +80,7 @@ The final answer goes to standard output. Use `kersh list` to list agents and `k
 
 ### Writing an agent file
 
-Set `name` to the directory name and give `description` one line for `kersh list`. rig reads `model` as `<provider>/<model>`. `claude-code/<model>` runs the local `claude` CLI; `anthropic/<model>` uses an API key. You may omit `model` for an agent that uses only another harness. Each provider obtains credentials through environment variables; a session inherits the variables captured from your login shell. kersh does not store, mint, encrypt, or enforce credentials.
+Set `name` to the directory name and give `description` one line for `kersh list`. rig reads `model` as `<provider>/<model>`. `claude-code/<model>` runs the local `claude` CLI with its own sign-in; `anthropic/<model>` reads its API key from the environment. You may omit `model` for an agent that uses only another harness. A session inherits the variables captured from your login shell. kersh does not store, mint, encrypt, or enforce credentials.
 
 Write the agent's identity in the body, which becomes its system prompt. Keep the situation out of this file; the caller and profile supply it at run time. A `profile` contains context, guards and a stop rule. With a profile, tool calls pass through `gaff hook`; without one, the agent is unrestricted. For shell commands, the tool starts `sh -c` in the root directory.
 
@@ -121,7 +121,7 @@ With `--group` and `--max-running`, starts at the group's limit exit `3`.
 
 ### Keeping sessions running
 
-The host alone writes session records, one host per user. Session changes start it automatically by default: `start`, `stop`, `resume`, `restart`, and `rm`. `kersh ps`, `kersh events`, and `kersh screen` work without it. `kersh host` runs it in the foreground.
+One host per user writes session records. By default, `start`, `stop`, `resume`, `restart`, `restart --mux`, `send`, `rm`, and `ps --follow` start it automatically. `kersh ps` without `--follow`, `kersh events`, and `kersh screen` work without it. `kersh host` runs it in the foreground.
 
 The session server supplies terminals. The host captures a fresh login shell's variables as the login environment for sessions. None come from the caller. A pane can vanish without an exit note, leaving its record `running` or `lost`. The host restores sessions at startup and when a server or pane disappears.
 
@@ -147,7 +147,7 @@ To expose commands through MCP on stdio, run:
 kersh serve
 ```
 
-These front ends and REST share calls through `Client`, kersh's library interface. REST uses `$XDG_STATE_HOME/kersh/host.sock` (default `~/.local/state/kersh/host.sock`); `GET /openapi.json` describes it. Each `Client` method has a command; `--json` returns matching JSON objects, one per line. Results use standard output; errors use standard error. Exit codes: `0` for success; `2` for usage errors refused before acting; `1` for other failures, including `kersh run` without a prompt; `3` at a group limit.
+These front ends and REST share calls through `Client`, kersh's library interface. REST uses `$XDG_STATE_HOME/kersh/host.sock` (default `~/.local/state/kersh/host.sock`); `GET /openapi.json` describes it. Each `Client` method has a command; `--json` returns matching JSON objects, one per line. Results use standard output; errors use standard error. Exit codes: `0` for success; `2` for CLI parsing or session usage errors; `1` for other failures, including missing input to `kersh run <agent>`; `3` at a group limit.
 
 ### Checking this machine
 

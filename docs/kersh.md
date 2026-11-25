@@ -46,7 +46,7 @@ You can pass a prompt as an argument and supply context through a pipe:
 git diff main...HEAD | kersh run reviewer --context-file - "review this diff"
 ```
 
-A pipe alone supplies no input: use `--context-file -` for context or `--prompt-file -` for the prompt, or give either option a filename. If your prompt begins with a dash, put `--` before it. `kersh render reviewer "hello"` prints the system prompt and first user turn without calling the model.
+A pipe alone supplies no input. Use `--context-file -` for context or `--prompt-file -` for the prompt; either option also accepts a filename. If your prompt begins with a dash, put `--` before it. `kersh render reviewer "hello"` prints the system prompt and first user turn without calling the model.
 
 kersh wraps context in a per-run marker to deny it instruction authority. Before constructing child-process arguments, it validates model strings so embedded options cannot execute hooks.
 
@@ -179,7 +179,7 @@ kersh service install
 kersh service stop
 ```
 
-`config.yml` defaults: `service_manager` is macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`; `auto_start` is `true`. Writes start missing hosts through installed units. Otherwise launchd jobs, transient systemd units or detached processes survive terminal closure. With `none`, installation fails with exit `1`; select `launchd` or `systemd`.
+`config.yml` defaults: `service_manager` is macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`; `auto_start` is `true`. With auto-start enabled, `start`, `stop`, `resume`, `restart`, `rm`, `send` and `ps --follow` start a missing host through its installed unit. Without a unit, the client starts a one-shot launchd job, transient systemd unit or detached process, according to `service_manager`; the host survives terminal closure. With `none`, installation fails with exit `1`; select `launchd` or `systemd`.
 
 ## Governance with gaff
 
