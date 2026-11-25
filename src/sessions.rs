@@ -53,6 +53,9 @@ pub trait Sessions {
     /// Every session that exists.
     fn list(&self) -> impl Future<Output = Result<Vec<SessionInfo>, Self::Error>> + Send;
 
+    /// Whether a session named `name` exists.
+    fn exists(&self, name: &str) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
     /// The visible lines of the session's screen, top to bottom.
     fn snapshot(&self, name: &str)
     -> impl Future<Output = Result<Vec<String>, Self::Error>> + Send;
@@ -62,6 +65,13 @@ pub trait Sessions {
         &self,
         name: &str,
         text: &str,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Press one key, by its tmux name (`Enter`).
+    fn send_key(
+        &self,
+        name: &str,
+        key: &str,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// End the session and its program.

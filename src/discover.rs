@@ -50,10 +50,27 @@ fn descendants(pid: i32) -> BTreeSet<i32> {
     }
 }
 
-/// Whether a process other than those in `except` names `id` in its
-/// arguments.
+/// Whether the command line `command` (as `ps` prints it) is `program`
+/// running with `id` among its arguments. The program is the first word,
+/// or the second when an interpreter runs it as a script (`node
+/// /usr/local/bin/claude`, `/bin/sh /path/claude`). Any other process
+/// that only mentions the id, such as `kersh start --resume-conversation
+/// <id>`, is not the harness.
 #[must_use]
-pub fn process_names(id: &str, except: &[i32]) -> bool {
+pub fn command_runs(command: &str, program: &str, id: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let is_program = |word: &&str| word.rsplit('/').next() == Some(program);
+    let runs_program = words.first().is_some_and(is_program)
+        || words
+            .get(1)
+            .is_some_and(|word| !word.starts_with('-') && is_program(word));
+    runs_program && words.iter().skip(1).any(|word| *word == id)
+}
+
+/// Whether a `program` process other than this one runs conversation
+/// `id`.
+#[must_use]
+pub fn harness_runs(program: &str, id: &str) -> bool {
     let Some(ps) = tool(&["/bin/ps", "/usr/bin/ps"]) else {
         return false;
     };
@@ -70,7 +87,7 @@ pub fn process_names(id: &str, except: &[i32]) -> bool {
         let line = line.trim_start();
         let (pid, command) = line.split_once(' ').unwrap_or((line, ""));
         let pid: i32 = pid.parse().unwrap_or_default();
-        pid != own && !except.contains(&pid) && command.contains(id)
+        pid != own && command_runs(command, program, id)
     })
 }
 
@@ -124,5 +141,29 @@ mod tests {
         );
         assert_eq!(rollout_id("/h/notes.jsonl"), None);
         assert_eq!(rollout_id("/h/rollout-short.jsonl"), None);
+    }
+
+    #[test]
+    fn only_the_harness_itself_runs_a_conversation() {
+        let id = "01a1fed2-a2b1-7920-bd65-ed031d9df9fb";
+        assert!(command_runs(&format!("claude --resume {id}"), "claude", id));
+        assert!(command_runs(
+            &format!("/home/u/.local/bin/claude --resume {id}"),
+            "claude",
+            id
+        ));
+        assert!(command_runs(
+            &format!("node /usr/local/bin/claude --resume {id}"),
+            "claude",
+            id
+        ));
+        assert!(!command_runs(
+            &format!("/usr/local/bin/kersh start --harness claude-code --resume-conversation {id}"),
+            "claude",
+            id
+        ));
+        assert!(!command_runs(&format!("grep {id} notes"), "claude", id));
+        assert!(!command_runs(&format!("codex resume {id}"), "claude", id));
+        assert!(!command_runs("claude --resume other", "claude", id));
     }
 }

@@ -21,8 +21,10 @@ const CODEX_STREAM: &str = include_str!("fixtures/codex-stream.jsonl");
 
 /// A fake Claude Code. Headless (`-p`), it reads the prompt on stdin:
 /// `stream` replays the canned stream, `hang` prints init and sleeps,
-/// `fail` exits 4. Interactive, the last argument decides: `exit0`,
-/// `exit3`, or anything else to wait.
+/// `fail` exits 4, `spawn` starts a child and waits for it, and `spam`
+/// exits 0 leaving a child that keeps printing. Interactive, the last
+/// argument decides: `exit0`, `exit3`, `hold` to wait as itself, or
+/// anything else to wait.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.999 (Claude Code)"; exit 0; fi
 mkdir -p "$HOME/fakelog"
@@ -41,6 +43,12 @@ if [ "$headless" = 1 ]; then
   case "$prompt" in
     hang*) echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'; exec sleep 600 ;;
     fail*) echo "boom" >&2; exit 4 ;;
+    spawn*)
+      sleep 600 &
+      echo $! > "$log.child"
+      echo '{"type":"system","subtype":"init","model":"fake","session_id":"'"$sid"'"}'
+      wait; exit 0 ;;
+    spam*) ( while :; do echo tick; sleep 0.5; done ) & exit 0 ;;
   esac
   sed "s/SESSION_ID/$sid/g" "$HOME/claude-stream.jsonl"
   echo "a warning on stderr" >&2
@@ -49,6 +57,7 @@ fi
 case "$last" in
   exit0) echo "fake claude says hi"; sleep 1; exit 0 ;;
   exit3) echo "fake claude fails"; exit 3 ;;
+  hold) echo "fake claude holding"; sleep 600; exit 0 ;;
   *) echo "fake claude waiting"; exec sleep 600 ;;
 esac
 "#;
@@ -519,7 +528,15 @@ fn an_interactive_failure_holds_the_pane_and_rm_waits_for_an_end() {
     assert!(env.kersh(&["stop", &id]).status.success());
     let output = env.kersh(&["rm", &id]);
     assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{id}\n"));
     assert!(!env.state().join("sessions").join(&id).exists());
+
+    let other = env.start(&["--harness", "claude-code"], "exit0");
+    env.wait_state(&other, "ended");
+    let output = env.kersh(&["rm", &other, "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let removed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(removed, serde_json::json!({ "id": other }));
 }
 
 #[test]
@@ -572,6 +589,10 @@ fn send_types_into_an_interactive_session_and_screen_reads_it_without_a_host() {
     env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
     let output = env.kersh_in(&["send", &id, "--prompt-file", "-"], "hello from send\n");
     assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("sent to {id}\n")
+    );
     env.stop_host();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -641,6 +662,135 @@ fn a_conversation_another_session_holds_is_refused() {
         stderr(&output).contains("already holds"),
         "{}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn a_free_conversation_resumes_and_one_a_harness_runs_is_refused() {
+    let env = Env::new();
+    let free = uuid::Uuid::new_v4().to_string();
+    let output = env.kersh_in(
+        &[
+            "start",
+            "--harness",
+            "claude-code",
+            "--resume-conversation",
+            &free,
+            "--prompt-file",
+            "-",
+        ],
+        "wait",
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let id = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    let record = env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    assert_eq!(record["conversation"]["id"], free.as_str());
+    assert_eq!(record["conversation"]["source"], "caller");
+
+    // A harness outside kersh, on another conversation.
+    let taken = uuid::Uuid::new_v4().to_string();
+    let mut outside = {
+        use std::os::unix::process::CommandExt as _;
+        Command::new(env.bin().join("claude"))
+            .args(["--resume", &taken, "hold"])
+            .env_clear()
+            .env("HOME", env.home())
+            .env("PATH", "/usr/bin:/bin")
+            .env("KERSH_SESSION", "outside")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    env.fake_log("outside", ".args");
+    let output = env.kersh_in(
+        &[
+            "start",
+            "--harness",
+            "claude-code",
+            "--resume-conversation",
+            &taken,
+            "--prompt-file",
+            "-",
+        ],
+        "wait",
+    );
+    let group = i32::try_from(outside.id()).unwrap();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .status();
+    let _ = outside.wait();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("another process already runs"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn sigterm_to_a_headless_wrapper_stops_the_harness_children_too() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "spawn");
+    let record = env.wait(&id, "the pids", |r| {
+        r["wrapper_pid"].is_i64() && r["harness_pid"].is_i64()
+    });
+    let child: i32 = env.fake_log(&id, ".child").trim().parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while events(&env, &id, 0).is_empty() {
+        assert!(Instant::now() < deadline, "no init event");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    kill(
+        i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
+        "TERM",
+    );
+    env.wait(&id, "the signal reason", |r| r["reason"].is_string());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        if Instant::now() > deadline {
+            kill(child, "KILL");
+            panic!("the harness's child outlived the stop");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_headless_harness_that_leaves_a_chatty_child_still_ends() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "spam");
+    let record = env.wait_state(&id, "ended");
+    assert_eq!(record["exit_status"], 0);
+}
+
+#[test]
+fn an_agent_name_that_leaves_the_store_is_refused() {
+    let env = Env::new();
+    let file = env.work().join("evil.md");
+    std::fs::write(&file, "---\nname: ../../x\n---\nBody.\n").unwrap();
+    let output = env.kersh(&["agent", "add", file.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not a valid agent name"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!env.home().join(".config/x").exists());
+}
+
+#[test]
+fn ps_with_a_state_no_session_is_in_says_so() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.wait_state(&id, "running");
+    let output = env.kersh(&["ps", "--state", "held"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "no sessions in state held.\n"
     );
 }
 
@@ -885,6 +1035,105 @@ fn ask_host(env: &Env, request: &Value) -> Result<Value, kersh::session::Session
     kersh::proto::parse_response(&line)
 }
 
+/// A start request as a client that skips the CLI would send it.
+fn raw_start(
+    env: &Env,
+    flags: &[&str],
+    group: Option<&str>,
+    max: Option<u32>,
+    settings_env: &Value,
+) -> Value {
+    serde_json::json!({
+        "schema": kersh::proto::PROTOCOL_SCHEMA,
+        "version": "test",
+        "op": "start",
+        "settings": {
+            "harness": "claude-code",
+            "mode": "interactive",
+            "model": null,
+            "environment": "local",
+            "profile": null,
+            "resume_prompt": null,
+            "tempdir": false,
+            "env": settings_env,
+        },
+        "flags": flags,
+        "agent": null,
+        "runtime_name": null,
+        "system_text": null,
+        "cwd": env.work(),
+        "labels": {},
+        "group": group,
+        "max_running": max,
+        "name": null,
+        "prompt": "wait",
+        "resume_conversation": null,
+        "size": null,
+    })
+}
+
+#[test]
+fn the_host_refuses_a_session_env_that_kersh_sets_itself() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.wait_state(&id, "running");
+    for key in ["KERSH_SESSION", "GAFF_PROFILE", "CLAUDE_CONFIG_DIR", "HOME"] {
+        let request = raw_start(&env, &[], None, None, &serde_json::json!({ key: "x" }));
+        let error = ask_host(&env, &request).unwrap_err();
+        assert!(
+            matches!(&error, kersh::session::SessionError::Usage { message } if message.contains(key)),
+            "{key}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_gaff_profile_in_the_login_environment_never_reaches_an_unprofiled_session() {
+    let env = Env::new();
+    let profile = env.home().join(".profile");
+    let mut text = std::fs::read_to_string(&profile).unwrap();
+    text.push_str("export GAFF_PROFILE=leaked\n");
+    std::fs::write(&profile, text).unwrap();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    let harness_env = env.fake_log(&id, ".env");
+    assert!(harness_env.contains(&format!("KERSH_SESSION={id}")));
+    assert!(!harness_env.contains("GAFF_PROFILE"), "{harness_env}");
+}
+
+#[test]
+fn a_profile_is_checked_against_the_path_the_session_gets() {
+    let env = Env::new();
+    write_exe(
+        &env.bin().join("gaff"),
+        "#!/bin/sh\nif [ \"$1 $2\" = \"profile list\" ]; then printf 'worker\\tagent\\n'; fi\n",
+    );
+    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
+    std::fs::write(
+        env.home().join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"gaff hook"}]}]}}"#,
+    )
+    .unwrap();
+    let runtime = env.work().join("nogaff.yml");
+    std::fs::write(
+        &runtime,
+        "harness: claude-code\nprofile: worker\nenv:\n  PATH: /usr/bin:/bin\n",
+    )
+    .unwrap();
+    let output = env.kersh(&["runtime", "add", "nogaff", runtime.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = env.kersh_in(
+        &["start", "--runtime", "nogaff", "--prompt-file", "-"],
+        "wait",
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("gaff is not on the session's PATH"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn the_host_refuses_a_bad_request_from_a_client_that_skips_the_cli() {
     let env = Env::new();
@@ -893,33 +1142,7 @@ fn the_host_refuses_a_bad_request_from_a_client_that_skips_the_cli() {
     env.wait_state(&id, "running");
 
     let start = |flags: &[&str], group: Option<&str>, max: Option<u32>| {
-        serde_json::json!({
-            "schema": kersh::proto::PROTOCOL_SCHEMA,
-            "version": "test",
-            "op": "start",
-            "settings": {
-                "harness": "claude-code",
-                "mode": "interactive",
-                "model": null,
-                "environment": "local",
-                "profile": null,
-                "resume_prompt": null,
-                "tempdir": false,
-                "env": {},
-            },
-            "flags": flags,
-            "agent": null,
-            "runtime_name": null,
-            "system_text": null,
-            "cwd": env.work(),
-            "labels": {},
-            "group": group,
-            "max_running": max,
-            "name": null,
-            "prompt": "wait",
-            "resume_conversation": null,
-            "size": null,
-        })
+        raw_start(&env, flags, group, max, &serde_json::json!({}))
     };
     // The request is well formed: with nothing wrong in it, it starts.
     let record = ask_host(&env, &start(&[], None, None)).unwrap();

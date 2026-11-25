@@ -384,6 +384,9 @@ impl Wrapper {
         let mut cause = Cause::Exited;
         let mut status = None;
         let mut open = true;
+        // Set once, when the harness exits; a pipe that keeps talking does
+        // not move it.
+        let mut drain_until: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 line = rx.recv(), if open => {
@@ -404,10 +407,11 @@ impl Wrapper {
                 }
                 done = child.wait(), if status.is_none() => {
                     status = Some(done.ok());
+                    drain_until = Some(tokio::time::Instant::now() + Duration::from_secs(2));
                 }
                 // A background process the harness left may hold its
                 // pipes open; stop reading a short while after the exit.
-                () = tokio::time::sleep(Duration::from_secs(2)), if status.is_some() && open => {
+                () = sleep_until(drain_until), if drain_until.is_some() && open => {
                     break;
                 }
                 _ = int.recv() => {
@@ -434,6 +438,14 @@ impl Wrapper {
             }
         }
         Ok((cause, status.flatten()))
+    }
+}
+
+/// Sleep until `deadline`, or forever without one.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

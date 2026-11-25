@@ -203,6 +203,8 @@ enum Command {
     Rm {
         /// The session.
         id: String,
+        #[command(flatten)]
+        json: JsonArg,
     },
     /// The harness builds kersh would run.
     Harness {
@@ -524,7 +526,10 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
             follow,
             json: json.json,
         },
-        Command::Rm { id } => S::Rm { id },
+        Command::Rm { id, json } => S::Rm {
+            id,
+            json: json.json,
+        },
         Command::Harness {
             command: HarnessCommand::List { json },
         } => S::HarnessList { json: json.json },

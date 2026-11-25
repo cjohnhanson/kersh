@@ -85,11 +85,14 @@ pub fn check_wire(paths: &Paths) -> Result<(), String> {
     match read_lock(paths) {
         Some(lock) if lock.wire_version != WIRE_VERSION => Err(format!(
             "the session server runs kersh {} (rmux wire {}), and this kersh {} speaks wire {}; \
-             `kersh restart --mux` restarts it and restores every session",
+             stop that server with `kill {}` (its pid in {}), then run the command again; \
+             its panes close with it",
             lock.version,
             lock.wire_version,
             env!("CARGO_PKG_VERSION"),
-            WIRE_VERSION
+            WIRE_VERSION,
+            lock.pid,
+            paths.mux_lock().display()
         )),
         _ => Ok(()),
     }
@@ -184,14 +187,6 @@ impl Rmux {
         self.sdk.pane(target).await.map_err(MuxError::from_display)
     }
 
-    /// Whether a session named `name` exists.
-    pub async fn exists(&self, name: &str) -> Result<bool, MuxError> {
-        self.sdk
-            .has_session(session_name(name)?)
-            .await
-            .map_err(MuxError::from_display)
-    }
-
     /// The screen and its size.
     pub async fn screen(&self, name: &str) -> Result<(Size, Vec<String>), MuxError> {
         let snapshot = self
@@ -207,15 +202,6 @@ impl Rmux {
             },
             snapshot.visible_lines(),
         ))
-    }
-
-    /// Press one key, by its tmux name (`Enter`).
-    pub async fn send_key(&self, name: &str, key: &str) -> Result<(), MuxError> {
-        self.pane(name)
-            .await?
-            .send_key(key)
-            .await
-            .map_err(MuxError::from_display)
     }
 }
 
@@ -262,6 +248,13 @@ impl Sessions for Rmux {
             .collect())
     }
 
+    async fn exists(&self, name: &str) -> Result<bool, Self::Error> {
+        self.sdk
+            .has_session(session_name(name)?)
+            .await
+            .map_err(MuxError::from_display)
+    }
+
     async fn snapshot(&self, name: &str) -> Result<Vec<String>, Self::Error> {
         Ok(self.screen(name).await?.1)
     }
@@ -270,6 +263,14 @@ impl Sessions for Rmux {
         self.pane(name)
             .await?
             .send_text(text)
+            .await
+            .map_err(MuxError::from_display)
+    }
+
+    async fn send_key(&self, name: &str, key: &str) -> Result<(), Self::Error> {
+        self.pane(name)
+            .await?
+            .send_key(key)
             .await
             .map_err(MuxError::from_display)
     }
@@ -382,4 +383,33 @@ pub fn terminal_size() -> Option<Size> {
         cols: size.ws_col,
         rows: size.ws_row,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wire_mismatch_names_the_server_to_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().join("state"), tmp.path().join("config"));
+        crate::paths::private_dir(&paths.state).unwrap();
+        assert!(check_wire(&paths).is_ok(), "no lock, no server to refuse");
+        let lock = MuxLock {
+            pid: 4242,
+            entry: Vec::new(),
+            version: "0.0.1".to_owned(),
+            wire_version: WIRE_VERSION + 1,
+            build_id: "x".to_owned(),
+        };
+        crate::paths::write_json(&paths.mux_lock(), &lock).unwrap();
+        let error = check_wire(&paths).unwrap_err();
+        assert!(!error.contains("restart --mux"), "{error}");
+        assert!(error.contains("kill 4242"), "{error}");
+        assert!(
+            error.contains(&paths.mux_lock().display().to_string()),
+            "{error}"
+        );
+    }
 }

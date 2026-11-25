@@ -82,6 +82,7 @@ pub enum SessionCmd {
     },
     Rm {
         id: String,
+        json: bool,
     },
     HarnessList {
         json: bool,
@@ -268,9 +269,13 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
                 Ok(text) => text,
                 Err(error) => return report(&error),
             };
-            client()
-                .send(&id, text.trim_end_matches('\n'))
-                .map_or_else(|error| report(&error), |()| ExitCode::SUCCESS)
+            match client().send(&id, text.trim_end_matches('\n')) {
+                Ok(()) => {
+                    println!("sent to {id}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => report(&error),
+            }
         }
         SessionCmd::Events {
             id,
@@ -279,9 +284,17 @@ pub fn dispatch(command: SessionCmd) -> ExitCode {
             text,
         } => events(&id, since, follow, text),
         SessionCmd::Screen { id, follow, json } => screen(&id, follow, json),
-        SessionCmd::Rm { id } => client()
-            .rm(&id)
-            .map_or_else(|error| report(&error), |()| ExitCode::SUCCESS),
+        SessionCmd::Rm { id, json } => match client().rm(&id) {
+            Ok(()) => {
+                if json {
+                    json_line(&serde_json::json!({ "id": id }));
+                } else {
+                    println!("{id}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => report(&error),
+        },
         SessionCmd::HarnessList { json } => match client().harness_list() {
             Ok(builds) => {
                 for build in &builds {
@@ -421,7 +434,10 @@ fn ps(ids: &[String], state: Option<State>, follow: bool, json: bool) -> ExitCod
         return ExitCode::SUCCESS;
     }
     if records.is_empty() {
-        println!("no sessions. `kersh start` starts one.");
+        match state {
+            Some(state) => println!("no sessions in state {state}."),
+            None => println!("no sessions. `kersh start` starts one."),
+        }
         return ExitCode::SUCCESS;
     }
     println!("{HEADER}");

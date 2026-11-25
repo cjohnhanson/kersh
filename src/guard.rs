@@ -68,12 +68,12 @@ pub fn registered_for_user(harness: Harness, env: &[(String, String)]) -> bool {
         .any(|path| names_gaff(path))
 }
 
-/// The profiles gaff lists, by running `gaff profile list` with the login
-/// environment in `cwd`.
+/// The profiles gaff lists, by running `gaff profile list` with the
+/// session's environment in `cwd`.
 pub fn gaff_profiles(cwd: &Path, env: &[(String, String)]) -> Result<Vec<String>, String> {
     let path_var = env_value(env, "PATH").unwrap_or_default();
     let gaff = crate::harness::find_on_path("gaff", path_var)
-        .ok_or_else(|| "gaff is not on the login PATH".to_owned())?;
+        .ok_or_else(|| "gaff is not on the session's PATH".to_owned())?;
     let output = std::process::Command::new(&gaff)
         .args(["profile", "list"])
         .env_clear()
@@ -179,6 +179,6 @@ mod tests {
             &env,
         )
         .unwrap_err();
-        assert!(error.contains("not on the login PATH"), "{error}");
+        assert!(error.contains("not on the session's PATH"), "{error}");
     }
 }

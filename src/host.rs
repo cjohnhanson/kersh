@@ -29,7 +29,7 @@ use crate::session::{
     Conversation, ConversationSource, EnvironmentInfo, Harness, Mode, RECORD_SCHEMA, Record,
     RuntimeInfo, SessionError, State,
 };
-use crate::sessions::{SessionSpec, Sessions as _, Size};
+use crate::sessions::{SessionSpec, Sessions, Size};
 use crate::wrapper::{ExitKind, LaunchFile, Note};
 
 /// What the host writes to `host.lock`.
@@ -55,6 +55,15 @@ pub fn label(paths: &Paths, role: &str) -> String {
         "kersh.{role}.{}",
         crate::service::short_hash(&paths.state.display().to_string())
     )
+}
+
+/// Which command moves a session back into running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relaunch {
+    /// `kersh resume`: a session that is not running.
+    Resume,
+    /// `kersh restart`: any interactive session.
+    Restart,
 }
 
 struct Host {
@@ -300,11 +309,22 @@ impl Host {
         }
     }
 
-    fn groups(&self) -> BTreeMap<String, u32> {
-        std::fs::read_to_string(self.paths.groups())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    /// Each group's limit. A missing file has none; a file that cannot be
+    /// read or parsed is an error, so no limit is lifted and no write
+    /// drops another group's.
+    fn groups(&self) -> Result<BTreeMap<String, u32>, SessionError> {
+        let path = self.paths.groups();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(error) => {
+                return Err(SessionError::failed(format!("{}: {error}", path.display())));
+            }
+        };
+        serde_json::from_str(&text)
+            .map_err(|error| SessionError::failed(format!("{}: {error}", path.display())))
     }
 
     /// Refuse a move into `running` at the group's limit. Called under the
@@ -313,7 +333,7 @@ impl Host {
         let Some(group) = group else {
             return Ok(());
         };
-        let mut groups = self.groups();
+        let mut groups = self.groups()?;
         if let Some(max) = max {
             groups.insert(group.to_owned(), max);
             crate::paths::write_json(&self.paths.groups(), &groups)
@@ -402,13 +422,21 @@ impl Host {
             )));
         }
         harness::check_flags(settings.harness, &launch.flags).map_err(SessionError::usage)?;
+        // Any client may send settings, so the host refuses the variables
+        // a runtime may not set even when the CLI already did.
+        for key in settings.env.keys() {
+            crate::runtime::check_env_key(key).map_err(SessionError::usage)?;
+        }
         if let Some(profile) = &settings.profile {
+            // The check reads the environment the harness gets, not the
+            // login environment it is built from.
+            let env = self.session_env("", &launch, None);
             crate::guard::check_profile(
                 settings.harness,
                 settings.mode,
                 profile,
                 &launch.cwd,
-                &self.login_env,
+                &env,
             )
             .map_err(SessionError::failed)?;
         }
@@ -418,7 +446,7 @@ impl Host {
 
         let _guard = self.writer.lock().await;
         if let Some(conversation) = &launch.resume_conversation {
-            self.check_conversation_free(conversation, None)?;
+            self.check_conversation_free(settings.harness, conversation, None)?;
         }
         self.gate(launch.group.as_deref(), launch.max_running)?;
 
@@ -584,7 +612,7 @@ impl Host {
             .map_err(|error| SessionError::failed(error.to_string()))
     }
 
-    async fn create_pane(&self, mux: &Rmux, record: &Record) -> Result<(), String> {
+    async fn create_pane(&self, mux: &impl Sessions, record: &Record) -> Result<(), String> {
         let mut argv = self.entry.clone();
         argv.extend([
             "session".to_owned(),
@@ -606,88 +634,123 @@ impl Host {
         mux.create(&spec).await.map_err(|error| error.to_string())
     }
 
-    /// Kill the record's pane, if it exists, and wait for its wrapper.
-    async fn end_pane(&self, mux: &Rmux, record: &Record) {
-        if mux.exists(&record.rmux_session).await.unwrap_or(false) {
-            let _ = mux.kill(&record.rmux_session).await;
+    /// Kill the record's pane, if it exists, and wait for its wrapper. A
+    /// session server that cannot answer is an error: the harness may
+    /// still run.
+    async fn end_pane(&self, mux: &impl Sessions, record: &Record) -> Result<(), SessionError> {
+        let unreachable = |error: &dyn std::fmt::Display| {
+            SessionError::failed(format!(
+                "cannot end session {}'s pane, so it is left as it was: {error}",
+                record.id
+            ))
+        };
+        if mux
+            .exists(&record.rmux_session)
+            .await
+            .map_err(|error| unreachable(&error))?
+        {
+            mux.kill(&record.rmux_session)
+                .await
+                .map_err(|error| unreachable(&error))?;
         }
         let Some(pid) = record.wrapper_pid.and_then(rustix::process::Pid::from_raw) else {
-            return;
+            return Ok(());
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         while rustix::process::test_kill_process(pid).is_ok() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        Ok(())
     }
 
     async fn stop(&self, id: &str) -> Result<Record, SessionError> {
         let mux = self.mux().await?;
+        self.stop_on(&mux, id).await
+    }
+
+    async fn stop_on(&self, mux: &impl Sessions, id: &str) -> Result<Record, SessionError> {
         let _guard = self.writer.lock().await;
         let mut record = self.load(id)?;
+        self.end_pane(mux, &record).await?;
         if matches!(record.state, State::Running | State::Held | State::Lost) {
             record.state = State::Ended;
             record.reason = Some("stopped".to_owned());
             record.ended_at = Some(crate::util::now_rfc3339());
             self.save(&record)?;
         }
-        self.end_pane(&mux, &record).await;
         Ok(record)
     }
 
     async fn restart(&self, id: &str) -> Result<Record, SessionError> {
+        let mux = self.mux().await?;
+        self.restart_on(&mux, id).await
+    }
+
+    async fn restart_on(&self, mux: &impl Sessions, id: &str) -> Result<Record, SessionError> {
         let record = self.load(id)?;
         if record.mode == Mode::Headless {
             return Err(SessionError::usage(format!(
                 "a headless session continues only with a new prompt: kersh resume {id} --prompt-file -"
             )));
         }
-        // A running session already holds its place, so its restart is
-        // not gated; any other move into running is.
-        let gated = record.state != State::Running;
-        self.relaunch(id, None, gated).await
+        self.relaunch(mux, id, None, Relaunch::Restart).await
     }
 
     async fn resume(&self, id: &str, prompt: Option<String>) -> Result<Record, SessionError> {
+        let mux = self.mux().await?;
+        self.resume_on(&mux, id, prompt).await
+    }
+
+    async fn resume_on(
+        &self,
+        mux: &impl Sessions,
+        id: &str,
+        prompt: Option<String>,
+    ) -> Result<Record, SessionError> {
         let record = self.load(id)?;
-        if record.state == State::Running {
-            return Err(SessionError::usage(format!(
-                "session {id} is running; `kersh restart {id}` restarts it"
-            )));
-        }
         let prompt = prompt.filter(|text| !text.trim().is_empty());
         if record.mode == Mode::Headless && prompt.is_none() {
             return Err(SessionError::usage(
                 "resuming a headless session needs a prompt; give --prompt-file",
             ));
         }
-        self.relaunch(id, prompt, true).await
+        self.relaunch(mux, id, prompt, Relaunch::Resume).await
     }
 
     async fn relaunch(
         &self,
+        mux: &impl Sessions,
         id: &str,
         prompt: Option<String>,
-        gated: bool,
+        kind: Relaunch,
     ) -> Result<Record, SessionError> {
-        let mux = self.mux().await?;
         let _guard = self.writer.lock().await;
         let mut record = self.load(id)?;
-        if gated {
+        // The state is read under the lock, so a session cannot move into
+        // or out of running between the check and the launch.
+        if kind == Relaunch::Resume && record.state == State::Running {
+            return Err(SessionError::usage(format!(
+                "session {id} is running; `kersh restart {id}` restarts it"
+            )));
+        }
+        // A running session already holds its place, so its restart is
+        // not gated; any other move into running is.
+        if record.state != State::Running {
             self.gate(record.group.as_deref(), None)?;
         }
         if record.conversation.is_none() {
             record.conversation = self.discover_conversation(&record);
         }
-        if record.conversation.is_none() {
+        let Some(conversation) = &record.conversation else {
             return Err(SessionError::failed(format!(
                 "session {id} has no {} conversation to resume yet",
                 record.harness
             )));
-        }
-        self.end_pane(&mux, &record).await;
-        if let Some(conversation) = &record.conversation {
-            self.check_conversation_free(&conversation.id, Some(&record.id))?;
-        }
+        };
+        // Before the pane goes: a refused relaunch leaves the session as
+        // it was.
+        self.check_conversation_free(record.harness, &conversation.id, Some(&record.id))?;
+        self.end_pane(mux, &record).await?;
         let launch = record.launches + 1;
         let stdin = match &prompt {
             Some(text) => {
@@ -710,7 +773,7 @@ impl Host {
         let env = self.relaunch_env(&record)?;
         self.write_launch(&record, &env, prompt.as_deref(), true, stdin)?;
         self.save(&record)?;
-        if let Err(error) = self.create_pane(&mux, &record).await {
+        if let Err(error) = self.create_pane(mux, &record).await {
             record.state = State::Held;
             record.reason = Some(format!("the session server refused the pane: {error}"));
             self.save(&record)?;
@@ -722,8 +785,13 @@ impl Host {
     }
 
     /// Refuse a conversation that another live record holds, or that a
-    /// process outside kersh names. Called under the writer lock.
-    fn check_conversation_free(&self, id: &str, own: Option<&str>) -> Result<(), SessionError> {
+    /// harness process outside kersh runs. Called under the writer lock.
+    fn check_conversation_free(
+        &self,
+        harness: Harness,
+        id: &str,
+        own: Option<&str>,
+    ) -> Result<(), SessionError> {
         let records = crate::session::read_records(&self.paths.sessions())?;
         if let Some(other) = records.iter().find(|record| {
             Some(record.id.as_str()) != own
@@ -738,7 +806,7 @@ impl Host {
                 other.id
             )));
         }
-        if crate::discover::process_names(id, &[]) {
+        if crate::discover::harness_runs(harness.program(), id) {
             return Err(SessionError::failed(format!(
                 "another process already runs conversation {id}"
             )));
@@ -900,5 +968,281 @@ impl Host {
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::session::Build;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("fake session server: {0}")]
+    struct FakeError(&'static str);
+
+    /// A session server that records kills and creates, and fails every
+    /// call when `fail` is set.
+    #[derive(Default)]
+    struct Fake {
+        fail: bool,
+        killed: std::sync::Mutex<Vec<String>>,
+        created: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        fn check(&self) -> Result<(), FakeError> {
+            if self.fail {
+                Err(FakeError("unreachable"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    // The double answers at once; `async fn` keeps it shaped like the
+    // real implementation.
+    #[allow(clippy::unused_async_trait_impl)]
+    impl Sessions for Fake {
+        type Error = FakeError;
+
+        async fn create(&self, spec: &SessionSpec) -> Result<(), FakeError> {
+            self.check()?;
+            self.created.lock().unwrap().push(spec.name.clone());
+            Ok(())
+        }
+
+        async fn list(&self) -> Result<Vec<crate::sessions::SessionInfo>, FakeError> {
+            self.check().map(|()| Vec::new())
+        }
+
+        async fn exists(&self, _name: &str) -> Result<bool, FakeError> {
+            self.check().map(|()| true)
+        }
+
+        async fn snapshot(&self, _name: &str) -> Result<Vec<String>, FakeError> {
+            self.check().map(|()| Vec::new())
+        }
+
+        async fn send_text(&self, _name: &str, _text: &str) -> Result<(), FakeError> {
+            self.check()
+        }
+
+        async fn send_key(&self, _name: &str, _key: &str) -> Result<(), FakeError> {
+            self.check()
+        }
+
+        async fn kill(&self, name: &str) -> Result<(), FakeError> {
+            self.check()?;
+            self.killed.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+    }
+
+    fn host(dir: &Path) -> Host {
+        let paths = Paths::new(dir.join("state"), dir.join("config"));
+        crate::paths::private_dir(&paths.state).unwrap();
+        crate::paths::private_dir(&paths.sessions()).unwrap();
+        Host {
+            paths,
+            config: Config::default(),
+            entry: vec!["/usr/bin/false".to_owned()],
+            login_env: Vec::new(),
+            writer: Mutex::new(()),
+            changes: broadcast::channel(16).0,
+            searched: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn record(id: &str, state: State, group: Option<&str>, conversation: &str) -> Record {
+        Record {
+            schema: RECORD_SCHEMA,
+            id: id.to_owned(),
+            name: None,
+            harness: Harness::ClaudeCode,
+            mode: Mode::Interactive,
+            state,
+            build: Build {
+                installer: "path".to_owned(),
+                path: PathBuf::from("/usr/bin/false"),
+                version: "0".to_owned(),
+            },
+            environment: EnvironmentInfo {
+                kind: "local".to_owned(),
+                cwd: PathBuf::from("/"),
+                tempdir: None,
+            },
+            agent: None,
+            runtime: RuntimeInfo {
+                name: None,
+                settings: crate::session::Settings {
+                    harness: Harness::ClaudeCode,
+                    mode: Mode::Interactive,
+                    model: None,
+                    environment: "local".to_owned(),
+                    profile: None,
+                    resume_prompt: None,
+                    tempdir: false,
+                    env: BTreeMap::new(),
+                },
+            },
+            system_prompt: None,
+            conversation: Some(Conversation {
+                id: conversation.to_owned(),
+                source: ConversationSource::Launch,
+            }),
+            agent_flags: Vec::new(),
+            first_prompt: None,
+            labels: BTreeMap::new(),
+            group: group.map(str::to_owned),
+            pgid: None,
+            boot_id: None,
+            wrapper_pid: None,
+            harness_pid: None,
+            rmux_session: format!("kersh-{id}"),
+            pane_size: crate::session::PaneSize::default(),
+            created_at: crate::util::now_rfc3339(),
+            ended_at: None,
+            exit_status: None,
+            reason: None,
+            restores: 0,
+            launches: 1,
+            progress: None,
+        }
+    }
+
+    /// Save `record` with a launch file, as a start leaves it.
+    fn put(host: &Host, record: &Record) {
+        crate::paths::private_dir(&host.paths.session(&record.id)).unwrap();
+        host.write_launch(record, &[], None, false, None).unwrap();
+        host.save(record).unwrap();
+    }
+
+    fn conversation_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_stop_the_session_server_cannot_answer_leaves_the_record_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let running = record("a", State::Running, Some("g"), &conversation_id());
+        put(&host, &running);
+        let fake = Fake {
+            fail: true,
+            ..Fake::default()
+        };
+        let error = host.stop_on(&fake, "a").await.unwrap_err();
+        assert!(error.to_string().contains("unreachable"), "{error}");
+        assert_eq!(host.load("a").unwrap(), running);
+    }
+
+    #[test]
+    fn an_unreadable_groups_file_is_an_error_and_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        host.gate(Some("g"), None).unwrap();
+        std::fs::write(host.paths.groups(), "{not json").unwrap();
+        let error = host.gate(Some("g"), None).unwrap_err();
+        assert!(error.to_string().contains("groups.json"), "{error}");
+        assert!(host.gate(Some("other"), Some(2)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(host.paths.groups()).unwrap(),
+            "{not json"
+        );
+    }
+
+    #[test]
+    fn an_id_that_leaves_the_sessions_directory_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let outside = host.paths.state.join("evil");
+        std::fs::create_dir_all(&outside).unwrap();
+        let ended = record("../evil", State::Ended, None, &conversation_id());
+        crate::paths::write_json(&outside.join("record.json"), &ended).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime.block_on(host.rm("../evil")).unwrap_err();
+        assert!(matches!(error, SessionError::NotFound { .. }), "{error:?}");
+        assert!(outside.join("record.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_a_session_that_became_running_while_it_waited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let held = record("a", State::Held, None, &conversation_id());
+        put(&host, &held);
+        let fake = Fake::default();
+        let guard = host.writer.lock().await;
+        let (result, ()) = tokio::join!(host.resume_on(&fake, "a", None), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut running = held.clone();
+            running.state = State::Running;
+            host.save(&running).unwrap();
+            drop(guard);
+        });
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("is running"), "{error}");
+        assert!(fake.killed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_gates_a_session_that_stopped_running_while_it_waited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        host.gate(Some("g"), Some(1)).unwrap();
+        let first = record("a", State::Running, Some("g"), &conversation_id());
+        put(&host, &first);
+        let fake = Fake::default();
+        let guard = host.writer.lock().await;
+        let (result, ()) = tokio::join!(host.restart_on(&fake, "a"), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut held = first.clone();
+            held.state = State::Held;
+            host.save(&held).unwrap();
+            put(
+                &host,
+                &record("b", State::Running, Some("g"), &conversation_id()),
+            );
+            drop(guard);
+        });
+        let error = result.unwrap_err();
+        assert!(matches!(error, SessionError::AtLimit { .. }), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resume_onto_a_held_conversation_leaves_the_pane_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let shared = conversation_id();
+        put(&host, &record("a", State::Held, None, &shared));
+        put(&host, &record("b", State::Running, None, &shared));
+        let fake = Fake::default();
+        let error = host.resume_on(&fake, "a", None).await.unwrap_err();
+        assert!(error.to_string().contains("already holds"), "{error}");
+        assert!(
+            fake.killed.lock().unwrap().is_empty(),
+            "the pane was killed"
+        );
+        assert_eq!(host.load("a").unwrap().state, State::Held);
+    }
+
+    #[tokio::test]
+    async fn resume_and_restart_relaunch_through_the_session_server() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        put(&host, &record("a", State::Held, None, &conversation_id()));
+        let fake = Fake::default();
+        let resumed = host.resume_on(&fake, "a", None).await.unwrap();
+        assert_eq!((resumed.state, resumed.launches), (State::Running, 2));
+        assert_eq!(*fake.killed.lock().unwrap(), ["kersh-a"]);
+        assert_eq!(*fake.created.lock().unwrap(), ["kersh-a"]);
+        let error = host.resume_on(&fake, "a", None).await.unwrap_err();
+        assert!(error.to_string().contains("is running"), "{error}");
+        let restarted = host.restart_on(&fake, "a").await.unwrap();
+        assert_eq!(restarted.launches, 3);
     }
 }

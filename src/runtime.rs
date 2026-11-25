@@ -159,14 +159,36 @@ pub fn safe_model(model: &str) -> bool {
         })
 }
 
-/// Variables kersh sets itself, which a runtime may not override.
-const RESERVED_ENV: &[&str] = &[
+/// Variables a runtime may not set: those kersh sets itself, and those
+/// that move a harness to other settings than the ones its profile check
+/// read, off gaff's hooks.
+pub const RESERVED_ENV: &[&str] = &[
     "KERSH_SESSION",
     "KERSH_MEMORY_ROOT",
     "GAFF_PROFILE",
     "COLORTERM",
     "COLORFGBG",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
 ];
+
+/// Refuse a session variable a runtime may not set.
+pub fn check_env_key(key: &str) -> Result<(), String> {
+    let ok = !key.is_empty()
+        && !key.starts_with(|c: char| c.is_ascii_digit())
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !ok {
+        return Err(format!("`{key}` is not a variable name"));
+    }
+    if RESERVED_ENV.contains(&key) {
+        return Err(format!(
+            "`{key}` comes from kersh or the login environment, not from a runtime"
+        ));
+    }
+    Ok(())
+}
 
 /// Check a runtime before it is written or used.
 pub fn validate(name: &str, runtime: &Runtime) -> Result<(), String> {
@@ -190,15 +212,7 @@ pub fn validate(name: &str, runtime: &Runtime) -> Result<(), String> {
         ));
     }
     for key in runtime.env.keys() {
-        let ok = !key.is_empty()
-            && !key.starts_with(|c: char| c.is_ascii_digit())
-            && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-        if !ok {
-            return Err(format!("runtime `{name}`: `{key}` is not a variable name"));
-        }
-        if RESERVED_ENV.contains(&key.as_str()) {
-            return Err(format!("runtime `{name}`: kersh sets `{key}` itself"));
-        }
+        check_env_key(key).map_err(|error| format!("runtime `{name}`: {error}"))?;
     }
     if let Some(harness) = runtime.harness {
         crate::harness::check_flags(harness, &runtime.flags)
@@ -280,10 +294,14 @@ pub fn resolve(
     runtimes: &BTreeMap<String, Runtime>,
     request: &StartRequest,
 ) -> Result<Resolved, String> {
+    // runtimes.yml may be edited by hand, so a runtime is checked again
+    // when a start uses it.
     let lookup = |name: &str| {
-        runtimes
+        let runtime = runtimes
             .get(name)
-            .ok_or_else(|| format!("no runtime named `{name}` in runtimes.yml"))
+            .ok_or_else(|| format!("no runtime named `{name}` in runtimes.yml"))?;
+        validate(name, runtime)?;
+        Ok::<_, String>(runtime)
     };
     let agent_runtime = agent
         .and_then(|agent| agent.meta.runtime.as_deref())
@@ -458,6 +476,47 @@ mod tests {
         assert!(validate("../w", &Runtime::default()).is_err());
         let unknown: Result<Runtime, _> = serde_yaml_ng::from_str("secrets: [x]\n");
         assert!(unknown.is_err(), "an unknown field is refused");
+    }
+
+    #[test]
+    fn a_runtime_may_not_move_the_harness_off_its_hooks() {
+        for key in [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "KERSH_SESSION",
+            "GAFF_PROFILE",
+        ] {
+            let runtime = Runtime {
+                env: BTreeMap::from([(key.to_owned(), "/elsewhere".to_owned())]),
+                ..Runtime::default()
+            };
+            let error = validate("w", &runtime).unwrap_err();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_runtime_from_a_hand_edited_file_is_checked_when_used() {
+        let all = runtimes("w:\n  harness: claude-code\n  env:\n    CLAUDE_CONFIG_DIR: /x\n");
+        let request = StartRequest {
+            runtime: Some("w".to_owned()),
+            ..StartRequest::default()
+        };
+        let error = resolve(None, &all, &request).unwrap_err();
+        assert!(error.contains("CLAUDE_CONFIG_DIR"), "{error}");
+    }
+
+    #[test]
+    fn a_model_that_reads_as_an_option_is_refused() {
+        let request = StartRequest {
+            harness: Some(Harness::ClaudeCode),
+            model: Some("--dangerously-skip-permissions".to_owned()),
+            ..StartRequest::default()
+        };
+        let error = resolve(None, &BTreeMap::new(), &request).unwrap_err();
+        assert!(error.contains("not a safe model name"), "{error}");
     }
 
     #[test]
