@@ -1,0 +1,3 @@
+signoff[review-code] PASS b6f68e8 only change is the rig-claude-code rev in Cargo.toml (c0db1f6 -> bf31a6b, equal to ls-remote refs/heads/main) plus Cargo.lock; no source changed; cargo check --locked --all-targets passes locally; verify green on CI
+
+signoff[review-deps] PASS b6f68e8 Cargo.lock holds one rmcp, 3.11.0 (2.2.0 removed); cargo tree -i rmcp --locked shows only kersh and rig-claude-code@bf31a6b depend on it; base64 0.23.1 is the only new package; no existing crate changes major version
