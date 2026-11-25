@@ -1,0 +1,4 @@
+signoff[review-code] PASS 1c445af round 2: diff from 5e12660 is AGENTS.md:78 and one test; round-1 read of connect_host, status/install/stop/start_unit/spawn stands; unmask --runtime matches systemd unit_file_unmask
+signoff[review-tests] PASS 1c445af 6 new systemd tests: 5 fail on 26d0150 src, the sixth red with systemd_call map_err removed; test.sh green; status present guard untested (declined, pre-existing)
+signoff[review-docs] PASS 1c445af AGENTS.md:78 matches src/model.rs:82,99 and src/cli.rs:1082; docs/kersh.md:182 matches session_calls.rs and service.rs
+signoff[review-usability] PASS 1c445af masked and no-user-manager refusals, incl. service install and stop, name the command or config value to change, said once, exit 1
