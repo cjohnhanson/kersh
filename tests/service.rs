@@ -43,20 +43,30 @@ esac
 exit 0
 "#;
 
-/// A fake systemctl that records each call. `enable` and `disable` set
-/// and clear the enabled marker, which `is-enabled` answers from; with
-/// the masked marker, `start` and `restart` fail as systemd fails a
-/// masked unit; otherwise `start` and `restart` start the host named by
-/// `FAKE_KERSH` and `FAKE_STATE`, enabled or not, as systemd would.
+/// A fake systemctl that records each call. With the no-bus marker every
+/// call fails as systemctl fails without a user manager. `enable` and
+/// `disable` set and clear the enabled marker; `is-enabled` prints the
+/// state as systemd does: the masked marker's text (`masked` or
+/// `masked-runtime`), `enabled`, or `disabled`. A masked unit refuses
+/// `enable`, `start` and `restart`; with the fails marker `start` and
+/// `restart` fail as a unit whose host exits at once; otherwise they
+/// start the host named by `FAKE_KERSH` and `FAKE_STATE`, enabled or
+/// not, as systemd would.
 const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/systemctl.log"
+[ -f "$HOME/no-bus" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
 [ "$1" = --user ] && shift
 case "$1" in
-  enable) : > "$HOME/systemd-enabled" ;;
+  enable)
+    [ -f "$HOME/systemd-masked" ] && { echo "Failed to enable unit: Unit file kersh-host.service is masked." >&2; exit 1; }
+    : > "$HOME/systemd-enabled" ;;
   disable) rm -f "$HOME/systemd-enabled" ;;
-  is-enabled) [ -f "$HOME/systemd-enabled" ] || exit 1 ;;
+  is-enabled)
+    if [ -f "$HOME/systemd-masked" ]; then cat "$HOME/systemd-masked"; exit 1; fi
+    if [ -f "$HOME/systemd-enabled" ]; then echo enabled; else echo disabled; exit 1; fi ;;
   start|restart)
     [ -f "$HOME/systemd-masked" ] && { echo "Unit kersh-host.service is masked." >&2; exit 1; }
+    [ -f "$HOME/systemd-fails" ] && { echo "Job for kersh-host.service failed because the control process exited with error code." >&2; exit 1; }
     if [ -n "$FAKE_KERSH" ]; then
       nohup "$FAKE_KERSH" host --state "$FAKE_STATE" >> "$HOME/fake-host.log" 2>&1 &
     fi ;;
@@ -65,9 +75,11 @@ exit 0
 "#;
 
 /// A fake systemd-run that records each call and runs the argv after
-/// `--` in the background, as a transient unit would.
+/// `--` in the background, as a transient unit would. With the no-bus
+/// marker it fails as systemd-run fails without a user manager.
 const FAKE_SYSTEMD_RUN: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/systemd-run.log"
+[ -f "$HOME/no-bus" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
 while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
 shift
 nohup "$@" >> "$HOME/fake-job.log" 2>&1 &
@@ -178,6 +190,7 @@ fn a_systemd_unit_installs_once_and_stops_cleanly() {
     assert_eq!(
         take(&env, "systemctl"),
         [
+            "--user is-enabled kersh-host.service",
             "--user daemon-reload",
             "--user enable kersh-host.service",
             "--user restart kersh-host.service",
@@ -189,6 +202,7 @@ fn a_systemd_unit_installs_once_and_stops_cleanly() {
     assert_eq!(
         take(&env, "systemctl"),
         [
+            "--user is-enabled kersh-host.service",
             "--user enable kersh-host.service",
             "--user start kersh-host.service",
         ]
@@ -375,16 +389,36 @@ fn doctor_reports_a_systemd_unit_that_is_not_enabled() {
     assert!(detail.contains("kersh service install"), "{unit}");
 }
 
-/// Run `kersh stop nosuch` with the fakes able to start a host; the
-/// command's output and each fake's calls.
+/// A runtime directory with a systemd user manager's private socket in
+/// it, as `XDG_RUNTIME_DIR` names it in a login session.
+fn user_manager_dir(env: &Env) -> std::path::PathBuf {
+    let dir = env.home().join("run");
+    std::fs::create_dir_all(dir.join("systemd")).unwrap();
+    std::fs::write(dir.join("systemd/private"), "").unwrap();
+    dir
+}
+
+/// Run `kersh stop nosuch` with the fakes able to start a host and a
+/// systemd user manager present; the command's output and each fake's
+/// calls.
 fn client_run(env: &Env) -> (std::process::Output, Vec<String>, Vec<String>) {
-    let output = env
-        .command(&["stop", "nosuch"])
+    client_run_with(env, true)
+}
+
+/// `client_run`, with or without a systemd user manager.
+fn client_run_with(
+    env: &Env,
+    user_manager: bool,
+) -> (std::process::Output, Vec<String>, Vec<String>) {
+    let mut command = env.command(&["stop", "nosuch"]);
+    command
         .env("FAKE_KERSH", env!("CARGO_BIN_EXE_kersh"))
         .env("FAKE_STATE", env.state())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
+        .stdin(std::process::Stdio::null());
+    if user_manager {
+        command.env("XDG_RUNTIME_DIR", user_manager_dir(env));
+    }
+    let output = command.output().unwrap();
     let systemctl = take(env, "systemctl");
     let systemd_run = take(env, "systemd-run");
     env.stop_host();
@@ -422,7 +456,7 @@ fn a_systemd_unit_that_fails_to_start_falls_back_to_a_one_shot_host() {
     let env = env_with("systemd");
     let install = env.kersh(&["service", "install"]);
     assert!(install.status.success(), "{}", stderr(&install));
-    std::fs::write(env.home().join("systemd-masked"), "").unwrap();
+    std::fs::write(env.home().join("systemd-fails"), "").unwrap();
     take(&env, "systemctl");
 
     let (output, systemctl, systemd_run) = client_run(&env);
@@ -443,6 +477,116 @@ fn a_systemd_unit_that_fails_to_start_falls_back_to_a_one_shot_host() {
         1,
         "the fallback is not said once: {err}"
     );
+    assert!(!err.contains("unmask"), "{err}");
+}
+
+/// Install the systemd unit, then mask it outside kersh with `state`
+/// (`masked` or `masked-runtime`), as `systemctl --user mask` would.
+fn masked_env(state: &str) -> Env {
+    let env = env_with("systemd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::remove_file(env.home().join("systemd-enabled")).unwrap();
+    std::fs::write(env.home().join("systemd-masked"), format!("{state}\n")).unwrap();
+    take(&env, "systemctl");
+    env
+}
+
+#[test]
+fn a_masked_systemd_unit_falls_back_and_names_unmask() {
+    let env = masked_env("masked");
+    let (output, _, systemd_run) = client_run(&env);
+    let err = stderr(&output);
+    assert!(
+        systemd_run
+            .iter()
+            .any(|call| call.contains("--unit=kersh-host-") && call.contains(" host --state ")),
+        "no one-shot host after the masked unit: {systemd_run:?}"
+    );
+    assert!(err.contains("nosuch"), "the host did not answer: {err}");
+    assert_eq!(
+        err.matches("systemctl --user unmask kersh-host.service")
+            .count(),
+        1,
+        "the remedy is not said once: {err}"
+    );
+}
+
+#[test]
+fn doctor_names_unmask_for_a_masked_systemd_unit() {
+    for (state, remedy) in [
+        ("masked", "systemctl --user unmask kersh-host.service"),
+        (
+            "masked-runtime",
+            "systemctl --user unmask --runtime kersh-host.service",
+        ),
+    ] {
+        let env = masked_env(state);
+        let unit = doctor_unit(&env, env.state().parent().unwrap());
+        assert_eq!(unit["state"], "unloaded", "{unit}");
+        let detail = unit["detail"].as_str().unwrap();
+        assert!(detail.contains(remedy), "{state}: {unit}");
+        assert!(!detail.contains("not enabled"), "{state}: {unit}");
+    }
+}
+
+#[test]
+fn an_install_over_a_masked_unit_names_unmask() {
+    let env = masked_env("masked");
+    let output = env.kersh(&["service", "install"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("systemctl --user unmask kersh-host.service"),
+        "{err}"
+    );
+    assert!(
+        !take(&env, "systemctl")
+            .iter()
+            .any(|call| call.contains(" enable ")),
+        "install tried to enable a masked unit"
+    );
+}
+
+/// The message for `service_manager: systemd` without a user manager.
+fn says_no_user_manager(err: &str) {
+    assert!(err.contains("no systemd user manager"), "{err}");
+    assert!(err.contains("service_manager: none"), "{err}");
+    assert!(!err.contains("Failed to connect to bus"), "{err}");
+}
+
+#[test]
+fn systemd_without_a_user_manager_says_so() {
+    let env = env_with("systemd");
+    std::fs::write(env.home().join("no-bus"), "").unwrap();
+    let (output, _, systemd_run) = client_run_with(&env, false);
+    assert!(!output.status.success());
+    assert_eq!(systemd_run.len(), 1, "{systemd_run:?}");
+    says_no_user_manager(&stderr(&output));
+}
+
+#[test]
+fn an_installed_systemd_unit_without_a_user_manager_says_so_once() {
+    let env = env_with("systemd");
+    let install = env.kersh(&["service", "install"]);
+    assert!(install.status.success(), "{}", stderr(&install));
+    std::fs::write(env.home().join("no-bus"), "").unwrap();
+    take(&env, "systemctl");
+
+    let (output, systemctl, systemd_run) = client_run_with(&env, false);
+    let err = stderr(&output);
+    assert!(!output.status.success());
+    assert!(
+        systemctl.contains(&"--user start kersh-host.service".to_owned()),
+        "{systemctl:?}"
+    );
+    assert!(
+        systemd_run.is_empty(),
+        "a one-shot host needs the same user manager: {systemd_run:?}"
+    );
+    assert!(!err.contains("one-shot"), "{err}");
+    assert_eq!(err.matches("no systemd user manager").count(), 1, "{err}");
+    says_no_user_manager(&err);
 }
 
 #[test]

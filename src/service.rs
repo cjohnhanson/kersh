@@ -128,6 +128,82 @@ fn call(program: &Path, args: &[&str]) -> Result<String, String> {
     ))
 }
 
+/// The error for `service_manager: systemd` when no systemd user manager
+/// runs for this user, so neither the unit nor `systemd-run` can start.
+#[must_use]
+pub fn no_user_manager() -> String {
+    "service_manager is systemd, but no systemd user manager runs for this user \
+     ($XDG_RUNTIME_DIR/systemd/private is missing); log in through a session that starts \
+     one, or set `service_manager: none` in config.yml"
+        .to_owned()
+}
+
+/// A failed systemd call's error, or, when no user manager runs, the
+/// message that says so instead of systemd's own.
+fn systemd_error(error: String) -> String {
+    if systemd_user_manager() {
+        error
+    } else {
+        no_user_manager()
+    }
+}
+
+/// Run `systemctl` with `args`, naming a missing user manager.
+fn systemd_call(args: &[&str]) -> Result<String, String> {
+    call(&systemctl(), args).map_err(systemd_error)
+}
+
+/// What `systemctl --user is-enabled` says of the `kersh-host` unit:
+/// whether it starts at login, and the state it prints (`enabled`,
+/// `disabled`, `masked`, `masked-runtime`, ...). `None` when systemctl
+/// cannot run.
+fn systemd_enabled() -> Option<(bool, String)> {
+    let output = std::process::Command::new(systemctl())
+        .args(["--user", "is-enabled", &format!("{UNIT}.service")])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
+}
+
+/// The command that lifts a mask, for a unit systemd reports in `state`.
+#[must_use]
+pub fn unmask_command(state: &str) -> Option<String> {
+    match state {
+        "masked" => Some(format!("systemctl --user unmask {UNIT}.service")),
+        "masked-runtime" => Some(format!("systemctl --user unmask --runtime {UNIT}.service")),
+        _ => None,
+    }
+}
+
+/// For a masked systemd unit, the command that lifts the mask.
+fn systemd_unmask(manager: ServiceManager) -> Option<String> {
+    if manager != ServiceManager::Systemd {
+        return None;
+    }
+    systemd_enabled().and_then(|(_, state)| unmask_command(&state))
+}
+
+/// The note a client prints when the installed unit fails to start with
+/// `error`, before it starts a one-shot host instead. `Err` when no
+/// one-shot host can start either: systemd without a user manager.
+pub fn unit_start_failed(manager: ServiceManager, error: &str) -> Result<String, String> {
+    if manager == ServiceManager::Systemd && !systemd_user_manager() {
+        return Err(no_user_manager());
+    }
+    let next = systemd_unmask(manager).map_or_else(
+        || "`kersh service install` reloads the unit.".to_owned(),
+        |command| format!("`{command}` lifts its mask, then `kersh service install` loads it."),
+    );
+    Ok(format!(
+        "the {UNIT} unit did not start ({error}); starting a one-shot host instead. {next}"
+    ))
+}
+
 fn launchd_domain() -> String {
     format!("gui/{}", rustix::process::getuid().as_raw())
 }
@@ -179,7 +255,9 @@ pub fn spawn(
         ServiceManager::Systemd => {
             let words = systemd_run_args(&label.replace('.', "-"), argv, env, log);
             let words: Vec<&str> = words.iter().map(String::as_str).collect();
-            call(&systemd_run(), &words).map(drop)
+            call(&systemd_run(), &words)
+                .map(drop)
+                .map_err(systemd_error)
         }
     }
 }
@@ -434,7 +512,8 @@ pub struct ServiceStatus {
     /// not loaded starts no host at all; an installed systemd unit that
     /// is not enabled does not start at login, and a client still starts
     /// it with `systemctl --user start`. `kersh service install` loads
-    /// or enables it again.
+    /// or enables it again; a masked systemd unit needs
+    /// `systemctl --user unmask` first.
     #[serde(default)]
     pub loaded: bool,
     /// This call wrote or removed the unit file.
@@ -462,11 +541,26 @@ pub fn installed_for(manager: ServiceManager, paths: &Paths) -> bool {
 pub fn status(manager: ServiceManager, paths: &Paths) -> ServiceStatus {
     let unit = user_unit_path(manager);
     let installed = installed_for(manager, paths);
-    // Ask the manager only about a unit of ours, so a machine without
-    // one runs no system tool.
-    let loaded = installed && loaded(manager);
+    // Ask the manager only about a unit file at the unit's path, so a
+    // machine without one runs no system tool. A mask is a link there.
+    let present = unit
+        .as_deref()
+        .is_some_and(|path| path.symlink_metadata().is_ok());
+    let (loaded, unmask) = match manager {
+        ServiceManager::Systemd if present => systemd_enabled()
+            .map_or((false, None), |(enabled, state)| {
+                (installed && enabled, unmask_command(&state))
+            }),
+        _ => (installed && loaded(manager), None),
+    };
     let detail = match (&unit, installed) {
         (None, _) => "service_manager is none, so no unit starts the host".to_owned(),
+        (Some(path), _) if unmask.is_some() => format!(
+            "{UNIT} unit at {} is masked, so systemd starts no host from it; `{}` lifts the \
+             mask, then `kersh service install` loads it",
+            path.display(),
+            unmask.as_deref().unwrap_or_default()
+        ),
         (Some(path), true) if loaded => format!("{UNIT} unit at {}", path.display()),
         (Some(path), true) if manager == ServiceManager::Systemd => format!(
             "{UNIT} unit at {} is not enabled, so it does not start at login; a client still \
@@ -511,16 +605,7 @@ fn launchd_loaded() -> bool {
 fn loaded(manager: ServiceManager) -> bool {
     match manager {
         ServiceManager::Launchd => launchd_loaded(),
-        ServiceManager::Systemd => call(
-            &systemctl(),
-            &[
-                "--user",
-                "is-enabled",
-                "--quiet",
-                &format!("{UNIT}.service"),
-            ],
-        )
-        .is_ok(),
+        ServiceManager::Systemd => systemd_enabled().is_some_and(|(enabled, _)| enabled),
         ServiceManager::None => false,
     }
 }
@@ -534,6 +619,12 @@ pub fn install(manager: ServiceManager, paths: &Paths) -> Result<ServiceStatus, 
          kersh-host unit"
             .to_owned()
     })?;
+    if let Some(command) = systemd_unmask(manager) {
+        return Err(format!(
+            "the {UNIT} unit is masked, so systemd will not load it; `{command}` lifts the mask, \
+             then `kersh service install` loads it"
+        ));
+    }
     crate::paths::private_dir(&paths.state).map_err(|error| error.to_string())?;
     let text = unit_text(
         manager,
@@ -567,17 +658,14 @@ pub fn install(manager: ServiceManager, paths: &Paths) -> Result<ServiceStatus, 
         ServiceManager::Systemd => {
             let service = format!("{UNIT}.service");
             if changed {
-                call(&systemctl(), &["--user", "daemon-reload"])?;
+                systemd_call(&["--user", "daemon-reload"])?;
             }
-            call(&systemctl(), &["--user", "enable", &service])?;
-            call(
-                &systemctl(),
-                &[
-                    "--user",
-                    if changed { "restart" } else { "start" },
-                    &service,
-                ],
-            )?;
+            systemd_call(&["--user", "enable", &service])?;
+            systemd_call(&[
+                "--user",
+                if changed { "restart" } else { "start" },
+                &service,
+            ])?;
         }
         ServiceManager::None => {}
     }
@@ -622,10 +710,7 @@ pub fn stop(manager: ServiceManager) -> Result<ServiceStatus, String> {
         }
         ServiceManager::Systemd => {
             if path.exists() {
-                call(
-                    &systemctl(),
-                    &["--user", "disable", "--now", &format!("{UNIT}.service")],
-                )?;
+                systemd_call(&["--user", "disable", "--now", &format!("{UNIT}.service")])?;
                 changed = true;
             }
         }
@@ -635,7 +720,7 @@ pub fn stop(manager: ServiceManager) -> Result<ServiceStatus, String> {
         std::fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         changed = true;
         if manager == ServiceManager::Systemd {
-            call(&systemctl(), &["--user", "daemon-reload"])?;
+            systemd_call(&["--user", "daemon-reload"])?;
         }
     }
     Ok(ServiceStatus {
@@ -661,11 +746,9 @@ pub fn start_unit(manager: ServiceManager) -> Result<(), String> {
             &["kickstart", &format!("{}/{UNIT}", launchd_domain())],
         )
         .map(drop),
-        ServiceManager::Systemd => call(
-            &systemctl(),
-            &["--user", "start", &format!("{UNIT}.service")],
-        )
-        .map(drop),
+        ServiceManager::Systemd => {
+            systemd_call(&["--user", "start", &format!("{UNIT}.service")]).map(drop)
+        }
         ServiceManager::None => Err("service_manager is none, so no unit starts".to_owned()),
     }
 }
@@ -791,6 +874,21 @@ mod tests {
             PathBuf::from("/c/systemd/user/kersh-host.service")
         );
         assert!(unit_path(ServiceManager::None, home, config).is_none());
+    }
+
+    #[test]
+    fn only_a_masked_state_has_an_unmask_command() {
+        assert_eq!(
+            unmask_command("masked").as_deref(),
+            Some("systemctl --user unmask kersh-host.service")
+        );
+        assert_eq!(
+            unmask_command("masked-runtime").as_deref(),
+            Some("systemctl --user unmask --runtime kersh-host.service")
+        );
+        for state in ["enabled", "disabled", "static", ""] {
+            assert!(unmask_command(state).is_none(), "{state}");
+        }
     }
 
     #[test]
