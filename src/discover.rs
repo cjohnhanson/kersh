@@ -14,6 +14,7 @@
 //!   of its arguments, alone or after `=` (`--resume=<id>`). The session
 //!   being relaunched is not another holder: its wrapper, everything
 //!   below the wrapper, and the harness's process group are left out.
+//!   When `ps` cannot be run the answer is an error, never "free".
 
 use std::collections::BTreeSet;
 
@@ -33,21 +34,41 @@ struct Process {
     command: String,
 }
 
-/// Every process, or none when `ps` cannot be run.
-fn processes() -> Vec<Process> {
-    let Some(ps) = tool(&["/bin/ps", "/usr/bin/ps"]) else {
-        return Vec::new();
-    };
-    let Ok(output) = std::process::Command::new(ps)
-        .args(["-A", "-o", "pid=,ppid=,pgid=,command="])
+/// The system `ps`.
+fn system_ps() -> Option<std::path::PathBuf> {
+    tool(&["/bin/ps", "/usr/bin/ps"])
+}
+
+/// Every process, as the `ps` at `ps` lists them. `-ww` asks both BSD ps
+/// and procps for the whole command line, never one cut to a width.
+fn list(ps: &std::path::Path) -> Result<Vec<Process>, String> {
+    let output = std::process::Command::new(ps)
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,command="])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
+        .map_err(|error| format!("cannot list processes with {}: {error}", ps.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot list processes with {}: it exited with {}",
+            ps.display(),
+            output.status
+        ));
+    }
+    Ok(parse(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Every process, or none when `ps` cannot be run; for discovery, where
+/// nothing found is a safe answer.
+fn processes() -> Vec<Process> {
+    system_ps()
+        .and_then(|ps| list(&ps).ok())
+        .unwrap_or_default()
+}
+
+/// The process table in `text`, one `pid ppid pgid command` per line.
+fn parse(text: &str) -> Vec<Process> {
+    text.lines()
         .filter_map(|line| {
             let mut rest = line;
             let mut number = || {
@@ -123,19 +144,32 @@ pub fn command_runs(command: &str, program: &str, id: &str) -> bool {
     runs_program && words.iter().skip(1).any(names_id)
 }
 
-/// Whether a `program` process runs conversation `id`, leaving out this
-/// process and the processes of `own`.
-#[must_use]
-pub fn harness_runs(program: &str, id: &str, own: &Own) -> bool {
-    let table = processes();
+/// The pid of a `program` process that runs conversation `id`, leaving
+/// out this process and the processes of `own`.
+pub fn holder(program: &str, id: &str, own: &Own) -> Result<Option<i32>, String> {
+    holder_in(system_ps().as_deref(), program, id, own)
+}
+
+/// [`holder`], from the process table the `ps` at `ps` lists.
+fn holder_in(
+    ps: Option<&std::path::Path>,
+    program: &str,
+    id: &str,
+    own: &Own,
+) -> Result<Option<i32>, String> {
+    let ps = ps.ok_or("cannot list processes: no ps in /bin or /usr/bin")?;
+    let table = list(ps)?;
     let this = i32::try_from(std::process::id()).unwrap_or_default();
     let excluded = tree(&table, &own.roots);
-    table.iter().any(|process| {
-        process.pid != this
-            && !excluded.contains(&process.pid)
-            && own.pgid != Some(process.pgid)
-            && command_runs(&process.command, program, id)
-    })
+    Ok(table
+        .iter()
+        .find(|process| {
+            process.pid != this
+                && !excluded.contains(&process.pid)
+                && own.pgid != Some(process.pgid)
+                && command_runs(&process.command, program, id)
+        })
+        .map(|process| process.pid))
 }
 
 /// The uuid in a rollout file name, if `path` names one.
@@ -174,6 +208,7 @@ pub fn codex_rollout(pid: i32) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -228,5 +263,67 @@ mod tests {
             "claude",
             id
         ));
+    }
+
+    /// A fake `ps` at `dir/ps` running `body`.
+    fn fake_ps(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join("ps");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_long_command_line_is_read_whole() {
+        let id = "01a1fed2-a2b1-7920-bd65-ed031d9df9fb";
+        let tmp = tempfile::tempdir().unwrap();
+        // procps and BSD ps both cut the command column to the terminal
+        // width unless asked for unlimited width with `-ww`.
+        let ps = fake_ps(
+            tmp.path(),
+            &format!(
+                "case \" $* \" in *' -ww '*) echo '41 1 41 claude --resume {id}' ;; \
+                 *) echo '41 1 41 claude --resume' ;; esac"
+            ),
+        );
+        assert_eq!(
+            holder_in(Some(&ps), "claude", id, &Own::default()),
+            Ok(Some(41))
+        );
+    }
+
+    #[test]
+    fn a_process_table_that_cannot_be_read_is_an_error() {
+        let id = "01a1fed2-a2b1-7920-bd65-ed031d9df9fb";
+        let tmp = tempfile::tempdir().unwrap();
+        let failing = fake_ps(tmp.path(), "echo '41 1 41 claude --resume x'; exit 1");
+        let missing = tmp.path().join("no-ps");
+        for ps in [None, Some(missing.as_path()), Some(failing.as_path())] {
+            let result = holder_in(ps, "claude", id, &Own::default());
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("cannot list processes")),
+                "{ps:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_table_parses_each_line_and_skips_the_rest() {
+        let table =
+            parse("  1     0     1 /sbin/launchd\n 52 1 52 claude --resume a b\nbad line\n");
+        let rows: Vec<(i32, i32, i32, &str)> = table
+            .iter()
+            .map(|p| (p.pid, p.ppid, p.pgid, p.command.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (1, 0, 1, "/sbin/launchd"),
+                (52, 1, 52, "claude --resume a b")
+            ]
+        );
     }
 }

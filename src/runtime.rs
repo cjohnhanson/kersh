@@ -162,7 +162,9 @@ pub fn safe_model(model: &str) -> bool {
 /// Prefixes of the variable families a runtime may not set: the harnesses'
 /// own settings (`CLAUDE_`, `CODEX_`, `ANTHROPIC_`, `OPENAI_`), gaff's and
 /// kersh's (`GAFF_`, `KERSH_`), where tools find their configuration
-/// (`XDG_`), and the dynamic loader's (`LD_`, `DYLD_`).
+/// (`XDG_`), the dynamic loader's (`LD_`, `DYLD_`), and the JavaScript
+/// runtimes' (`BUN_`, `NODE_`), whose options such as `BUN_OPTIONS` and
+/// `NODE_OPTIONS` preload code into a harness built on them.
 pub const RESERVED_ENV_PREFIXES: &[&str] = &[
     "CLAUDE_",
     "CODEX_",
@@ -173,19 +175,21 @@ pub const RESERVED_ENV_PREFIXES: &[&str] = &[
     "XDG_",
     "LD_",
     "DYLD_",
+    "BUN_",
+    "NODE_",
 ];
 
 /// Single names a runtime may not set: where programs and their
-/// configuration are found, and the terminal colours kersh sets for every
-/// pane.
+/// configuration are found, and the terminal colours of every pane.
 pub const RESERVED_ENV_NAMES: &[&str] = &["HOME", "PATH", "SHELL", "COLORTERM", "COLORFGBG"];
 
-/// Refuse a session variable a runtime may not set. The rule is by
-/// family, so a variable a harness adds later is refused with the rest:
-/// any name that starts with one of [`RESERVED_ENV_PREFIXES`], and each of
-/// [`RESERVED_ENV_NAMES`]. kersh and the login environment set these, and
-/// any of them can move a harness to other settings than the ones its
-/// profile check read, off gaff's hooks.
+/// Refuse a session variable a runtime may not set. kersh reserves these
+/// variables so a runtime cannot change how a harness loads its config,
+/// hooks, or code: any name that starts with one of
+/// [`RESERVED_ENV_PREFIXES`], and each of [`RESERVED_ENV_NAMES`]. The rule
+/// is by family, so a variable a harness adds later is refused with the
+/// rest. It is a guardrail against a misconfigured runtime, not a
+/// sandbox: an agent running as the same user can start any program.
 pub fn check_env_key(key: &str) -> Result<(), String> {
     let ok = !key.is_empty()
         && !key.starts_with(|c: char| c.is_ascii_digit())
@@ -198,8 +202,15 @@ pub fn check_env_key(key: &str) -> Result<(), String> {
             .iter()
             .any(|prefix| key.starts_with(prefix))
     {
+        let families: Vec<String> = RESERVED_ENV_PREFIXES
+            .iter()
+            .map(|prefix| format!("{prefix}*"))
+            .chain(RESERVED_ENV_NAMES.iter().map(|name| (*name).to_owned()))
+            .collect();
         return Err(format!(
-            "remove {key} from the runtime's env; kersh sets the harness and tool variables itself"
+            "{key} is reserved: a runtime may not set {} variables, which change how a harness \
+             loads its config or hooks; remove it from the runtime's env",
+            families.join(", ")
         ));
     }
     Ok(())
@@ -507,6 +518,8 @@ mod tests {
         "XDG_CONFIG_HOME",
         "LD_PRELOAD",
         "DYLD_INSERT_LIBRARIES",
+        "BUN_OPTIONS",
+        "NODE_OPTIONS",
         "HOME",
         "PATH",
         "SHELL",
@@ -521,9 +534,13 @@ mod tests {
             };
             let error = validate("w", &runtime).unwrap_err();
             assert!(
-                error.contains(&format!("remove {key} from the runtime's env")),
+                error.contains(&format!(
+                    "{key} is reserved: a runtime may not set CLAUDE_*,"
+                )) && error.contains("NODE_*")
+                    && error.ends_with("remove it from the runtime's env"),
                 "{key}: {error}"
             );
+            assert!(!error.contains("kersh sets"), "{key}: {error}");
             let all = BTreeMap::from([("w".to_owned(), runtime)]);
             let request = StartRequest {
                 runtime: Some("w".to_owned()),

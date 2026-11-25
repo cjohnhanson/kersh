@@ -51,7 +51,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs` | rig, the built-in harness, and its gaff governance |
 | `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol, each with a schema number |
 | `src/host.rs`, `src/wrapper.rs`, `src/mux.rs`, `src/service.rs` | the host (single writer), the pane wrapper and its exit cases, the rmux server and attach client, and how the host and server start |
-| `src/harness.rs`, `src/runtime.rs`, `src/login_env.rs`, `src/guard.rs`, `src/discover.rs` | launch argv and the flag allow-list per harness, runtimes and settings order, the login environment, profile checks, and Codex conversation discovery |
+| `src/harness.rs`, `src/runtime.rs`, `src/login_env.rs`, `src/guard.rs`, `src/discover.rs` | launch argv and the flag allow-list per harness, runtimes and settings order, the login environment, profile checks, and the process table: Codex conversation discovery and the check that no other harness process runs a conversation |
 | `src/client/session_calls.rs`, `src/cli_sessions.rs` | the session calls on `Client` and their commands |
 | `src/setup.rs`, `src/memories.rs` | `kersh setup` and `kersh memories` |
 | `tests/sessions.rs`, `tests/fixtures/` | sessions end to end: a real session server on a temp socket, fake `claude` and `codex` scripts, canned streams |

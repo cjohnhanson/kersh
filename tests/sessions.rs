@@ -730,7 +730,11 @@ fn a_free_conversation_resumes_and_one_a_harness_runs_is_refused() {
     let _ = outside.wait();
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("another process already runs"),
+        stderr(&output).contains(&format!(
+            "another process (pid {}) already runs conversation {taken}; \
+             stop that process or pick another conversation",
+            outside.id()
+        )),
         "{}",
         stderr(&output)
     );
@@ -781,10 +785,79 @@ fn a_conversation_another_session_s_harness_runs_is_refused_on_resume() {
     edit_record(&env, &holder, |r| r["state"] = "running".into());
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("another process already runs"),
+        stderr(&output).contains(&format!("already runs conversation {uuid}")),
         "{}",
         stderr(&output)
     );
+}
+
+/// A holder that runs `uuid` as `hold`, a second session whose record
+/// names `uuid` and the holder's wrapper pid after `edit`, and the
+/// holder's record set to ended so only its process can refuse. Returns
+/// the result of `relaunch` on the second session.
+fn relaunch_over_a_holder_s_old_pids(
+    relaunch: &str,
+    stop_other: bool,
+    edit: impl FnOnce(&mut Value),
+) -> (Output, String) {
+    let env = Env::new();
+    let holder = env.start(&["--harness", "claude-code"], "hold");
+    let record = env.wait(&holder, "the wrapper pid", |r| {
+        r["harness_pid"].is_i64() && r["wrapper_pid"].is_i64()
+    });
+    let uuid = record["conversation"]["id"].as_str().unwrap().to_owned();
+    let holder_wrapper = record["wrapper_pid"].clone();
+    env.fake_log(&holder, ".args");
+    let other = env.start(&["--harness", "claude-code"], "hold");
+    env.wait(&other, "the harness pid", |r| r["harness_pid"].is_i64());
+    env.fake_log(&other, ".args");
+    if stop_other {
+        assert!(env.kersh(&["stop", &other]).status.success());
+    }
+    edit_record(&env, &holder, |r| r["state"] = "ended".into());
+    edit_record(&env, &other, |r| {
+        r["conversation"]["id"] = uuid.clone().into();
+        r["wrapper_pid"] = holder_wrapper;
+        edit(r);
+    });
+    let output = if relaunch == "resume" {
+        env.kersh_in(&["resume", &other, "--prompt-file", "-"], "wait")
+    } else {
+        env.kersh(&[relaunch, &other])
+    };
+    edit_record(&env, &holder, |r| r["state"] = "running".into());
+    (output, uuid)
+}
+
+fn assert_refused_as_held(output: &Output, uuid: &str) {
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(output));
+    assert!(
+        stderr(output).contains(&format!("already runs conversation {uuid}")),
+        "{}",
+        stderr(output)
+    );
+}
+
+#[test]
+fn an_ended_record_s_old_wrapper_pid_hides_no_holder() {
+    let (output, uuid) = relaunch_over_a_holder_s_old_pids("resume", true, |_| ());
+    assert_refused_as_held(&output, &uuid);
+}
+
+#[test]
+fn a_running_record_from_another_boot_hides_no_holder() {
+    let (output, uuid) = relaunch_over_a_holder_s_old_pids("restart", false, |r| {
+        r["boot_id"] = "another-boot".into();
+    });
+    assert_refused_as_held(&output, &uuid);
+}
+
+#[test]
+fn a_running_record_from_an_unknown_boot_hides_no_holder() {
+    let (output, uuid) = relaunch_over_a_holder_s_old_pids("restart", false, |r| {
+        r["boot_id"] = Value::Null;
+    });
+    assert_refused_as_held(&output, &uuid);
 }
 
 #[test]
@@ -1130,7 +1203,7 @@ fn raw_start(
 }
 
 #[test]
-fn the_host_refuses_a_session_env_that_kersh_sets_itself() {
+fn the_host_refuses_a_reserved_session_env() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code"], "wait");
     env.wait_state(&id, "running");
@@ -1146,6 +1219,8 @@ fn the_host_refuses_a_session_env_that_kersh_sets_itself() {
         "XDG_CONFIG_HOME",
         "LD_PRELOAD",
         "DYLD_INSERT_LIBRARIES",
+        "BUN_OPTIONS",
+        "NODE_OPTIONS",
         "HOME",
         "PATH",
         "SHELL",
@@ -1154,7 +1229,8 @@ fn the_host_refuses_a_session_env_that_kersh_sets_itself() {
         let error = ask_host(&env, &request).unwrap_err();
         assert!(
             matches!(&error, kersh::session::SessionError::Usage { message }
-                if message.contains(&format!("remove {key} from the runtime's env"))),
+                if message.contains(&format!("{key} is reserved:"))
+                    && message.ends_with("remove it from the runtime's env")),
             "{key}: {error:?}"
         );
     }
@@ -1197,7 +1273,7 @@ fn a_runtime_may_not_change_the_path_a_profile_check_reads() {
     let output = env.kersh(&["runtime", "add", "nogaff", runtime.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("remove PATH from the runtime's env"),
+        stderr(&output).contains("PATH is reserved:"),
         "{}",
         stderr(&output)
     );

@@ -786,8 +786,9 @@ impl Host {
 
     /// Refuse a conversation that another live record holds, or that a
     /// harness process runs other than `own`'s own launch: its wrapper,
-    /// the wrapper's descendants, and its harness's process group. Called
-    /// under the writer lock.
+    /// the wrapper's descendants, and its harness's process group, when
+    /// `own` is running or held and from this boot. A process table that
+    /// cannot be read refuses too. Called under the writer lock.
     fn check_conversation_free(
         &self,
         harness: Harness,
@@ -808,12 +809,15 @@ impl Host {
                 other.id
             )));
         }
-        // Process ids from another boot name other processes now.
+        // Only a live record's process ids are its own: an ended record's
+        // may name other processes now, and so may ids from another boot
+        // or from a boot either side cannot name.
         let boot = crate::service::boot_id();
         let own = own
+            .filter(|record| matches!(record.state, State::Running | State::Held))
             .filter(|record| match (&record.boot_id, &boot) {
                 (Some(then), Some(now)) => then == now,
-                _ => true,
+                _ => false,
             })
             .map(|record| crate::discover::Own {
                 roots: record
@@ -824,12 +828,16 @@ impl Host {
                 pgid: record.pgid,
             })
             .unwrap_or_default();
-        if crate::discover::harness_runs(harness.program(), id, &own) {
-            return Err(SessionError::failed(format!(
-                "another process already runs conversation {id}"
-            )));
+        match crate::discover::holder(harness.program(), id, &own) {
+            Ok(None) => Ok(()),
+            Ok(Some(pid)) => Err(SessionError::failed(format!(
+                "another process (pid {pid}) already runs conversation {id}; \
+                 stop that process or pick another conversation"
+            ))),
+            Err(error) => Err(SessionError::failed(format!(
+                "cannot tell whether another process runs conversation {id}: {error}"
+            ))),
         }
-        Ok(())
     }
 
     /// The environment of a relaunch: the last launch's, which already
