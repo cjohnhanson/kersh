@@ -7,8 +7,7 @@
 //! session is a separate client path, not a method here, because it
 //! hands the terminal over rather than exchanging data.
 //!
-//! This release declares the interface only; no implementation exists
-//! yet.
+//! [`crate::mux::Rmux`] is the implementation.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -27,7 +26,8 @@ pub struct SessionSpec {
     pub name: String,
     /// The program and its arguments. No shell parses them.
     pub argv: Vec<String>,
-    /// The whole environment of the program. Nothing is inherited.
+    /// Variables set over the server's environment, which is the
+    /// captured login environment.
     pub env: Vec<(String, String)>,
     /// The working directory of the program.
     pub cwd: PathBuf,
