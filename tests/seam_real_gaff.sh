@@ -24,6 +24,9 @@ trap 'rm -rf "$T"' EXIT
 export HOME="$T/home" GAFF_STATE_DIR="$T/state" KERSH_GAFF="$GAFF"
 mkdir -p "$HOME/.config/gaff" "$T/root/agents/reviewer" "$T/root/notes"
 : >"$T/root/kersh.yml"
+# Run from the scratch root, so gaff reads only this test's config and
+# never the config of the repository the script was started from.
+cd "$T/root"
 
 cat >"$T/root/agents/reviewer/AGENT.md" <<'MD'
 ---
