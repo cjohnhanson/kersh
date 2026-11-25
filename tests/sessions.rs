@@ -1097,7 +1097,7 @@ fn the_group_limit_counts_only_running_sessions_of_its_own_group() {
 }
 
 #[test]
-fn a_harness_killed_by_a_signal_kersh_did_not_send_is_left_running_for_restore() {
+fn a_harness_killed_by_a_signal_kersh_did_not_send_is_restored_with_the_signal_as_cause() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code"], "wait");
     let record = env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
@@ -1105,12 +1105,15 @@ fn a_harness_killed_by_a_signal_kersh_did_not_send_is_left_running_for_restore()
         i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap(),
         "KILL",
     );
-    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
+    // The signal leaves the record running, and the host's restore then
+    // takes it; the restore names the signal as the cause.
+    let record = env.wait(&id, "a restore", |r| {
+        r["restores"].as_array().is_some_and(|l| !l.is_empty())
+    });
     assert_eq!(
-        record["reason"],
-        "killed by signal 9; left running for restore"
+        record["restores"][0]["after"],
+        "its pane closed (killed by signal 9)"
     );
-    assert_eq!(record["state"], "running");
 }
 
 #[test]
@@ -1133,7 +1136,7 @@ fn a_harness_that_cannot_start_holds_the_pane_with_the_cause() {
 }
 
 #[test]
-fn sigterm_to_a_headless_wrapper_leaves_the_record_running_and_stops_the_harness() {
+fn sigterm_to_a_headless_wrapper_holds_the_session_and_stops_the_harness() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "hang");
     let record = env.wait(&id, "the pids", |r| {
@@ -1149,9 +1152,11 @@ fn sigterm_to_a_headless_wrapper_leaves_the_record_running_and_stops_the_harness
         i32::try_from(record["wrapper_pid"].as_i64().unwrap()).unwrap(),
         "TERM",
     );
-    let record = env.wait(&id, "the signal reason", |r| r["reason"].is_string());
-    assert_eq!(record["reason"], "SIGTERM; left running for restore");
-    assert_eq!(record["state"], "running");
+    let record = env.wait(&id, "a restore", |r| {
+        r["restores"].as_array().is_some_and(|l| !l.is_empty())
+    });
+    assert_eq!(record["restores"][0]["after"], "its pane closed (SIGTERM)");
+    assert_eq!(record["state"], "held", "a headless run is not resumed");
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(harness) {
         assert!(
