@@ -1,0 +1,65 @@
+doc: |
+  gaff's hook-agent contract. gaff runs a hook agent as
+  `kersh run <name> --context-file -` with a cleared environment, a
+  stripped PATH, and no HOME, writes the situation to standard input, and
+  reads the verdict from standard output. The run must exit 0 and print
+  the final text and one newline, and nothing else, because gaff parses
+  that stream.
+
+  The first case discovers the agent from the working directory, the way
+  a hook agent runs inside the repository. The second names the root with
+  --root from an unrelated working directory. Neither proves the
+  user-level store under the home directory: with HOME unset kersh reads
+  the home directory from the user database, and that store is the real
+  user's, so a hermetic case cannot hold it. A unit test holds the
+  choice instead.
+transitions:
+  - name: "a hook-agent run prints only the verdict"
+    command: |
+      K=$(command -v kersh)
+      K=$(cd "$(dirname "$K")" && pwd)/$(basename "$K")
+      root=$(cd kersh-root && pwd)
+      T=$(mktemp -d)
+
+      # A fake gaff that allows every event and records the environment
+      # it ran in, which is the environment kersh ran in.
+      cat > "$T/gaff" <<SH
+      #!/bin/sh
+      cat > /dev/null
+      env > "$T/env"
+      exit 0
+      SH
+      chmod +x "$T/gaff"
+
+      verdict='[{"kind":"text","text":"VERDICT: pass"}]'
+      printf 'VERDICT: pass\n' > "$T/want"
+
+      # Discovery from the working directory, HOME unset.
+      ( cd "$root" && printf 'diff --git a/x b/x\n' | env -i PATH=/usr/bin:/bin \
+          KERSH_FAKE_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
+          "$K" run reviewer --context-file - ) > "$T/out" 2> "$T/err"
+      code=$?
+      [ "$code" = 0 ] || { echo "FAIL: the run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }
+      cmp -s "$T/out" "$T/want" || { echo "FAIL: stdout must be the verdict only: $(od -c "$T/out")"; rm -rf "$T"; exit 1; }
+      if grep -q '^HOME=' "$T/env"; then echo "FAIL: the case must run with HOME unset"; rm -rf "$T"; exit 1; fi
+
+      # An explicit root from an unrelated working directory.
+      ( cd "$T" && printf 'diff --git a/x b/x\n' | env -i PATH=/usr/bin:/bin \
+          KERSH_FAKE_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
+          "$K" run reviewer --root "$root" --context-file - ) > "$T/out" 2> "$T/err"
+      code=$?
+      [ "$code" = 0 ] || { echo "FAIL: the --root run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }
+      cmp -s "$T/out" "$T/want" || { echo "FAIL: --root stdout must be the verdict only: $(od -c "$T/out")"; rm -rf "$T"; exit 1; }
+
+      # The context on standard input reaches the model.
+      ( cd "$root" && printf 'STAGED-CHANGE-31\n' | env -i PATH=/usr/bin:/bin \
+          KERSH_FAKE_SCRIPT='[{"kind":"echo_prompt"}]' KERSH_GAFF="$T/gaff" \
+          "$K" run reviewer --context-file - ) > "$T/out" 2> "$T/err"
+      code=$?
+      [ "$code" = 0 ] || { echo "FAIL: the echo run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }
+      grep -q 'STAGED-CHANGE-31' "$T/out" || { echo "FAIL: the stdin context must reach the model: $(cat "$T/out")"; rm -rf "$T"; exit 1; }
+
+      rm -rf "$T"
+      echo GAFF_RUNNER_OK
+    target: ../gaff-runner-checked
+    stdout: "GAFF_RUNNER_OK\n"

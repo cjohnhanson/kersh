@@ -1,0 +1,10 @@
+Create a kersh root and a starter agent. Existing files are kept
+
+Usage: kersh init [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]  The agent to create [default: reviewer]
+
+Options:
+      --root <DIR>  Create the root in this directory instead of the current one
+  -h, --help        Print help

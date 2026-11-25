@@ -1,0 +1,8 @@
+Check that every agent file loads. Exits 1 when one does not
+
+Usage: kersh check [OPTIONS]
+
+Options:
+      --root <DIR>  Use this kersh root instead of the nearest one above the current directory
+      --json        Print JSON, one object per line
+  -h, --help        Print help

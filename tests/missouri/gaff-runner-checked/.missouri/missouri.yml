@@ -1,0 +1,2 @@
+doc: |
+  a hook-agent run under a cleared environment printed only its verdict

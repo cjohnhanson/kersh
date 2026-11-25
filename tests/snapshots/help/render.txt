@@ -1,0 +1,13 @@
+Print the prompt a run would send, without calling the model
+
+Usage: kersh render [OPTIONS] <NAME> [PROMPT]
+
+Arguments:
+  <NAME>    The agent to render
+  [PROMPT]  The prompt. Put `--` before a prompt that starts with a dash
+
+Options:
+      --context-file <PATH|->  Read context from this file, or from standard input for `-`
+      --root <DIR>             Use this kersh root instead of the nearest one above the current directory
+      --json                   Print JSON, one object per line
+  -h, --help                   Print help

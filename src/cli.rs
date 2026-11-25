@@ -1,9 +1,17 @@
-//! The command surface. `main` is a thin shim so the whole surface is
-//! testable in process, as the sibling tools are.
+//! The command surface. `main` in the binary is a thin shim, so the whole
+//! surface is testable in process.
+//!
+//! Results go to standard output and errors to standard error. The exit
+//! code is 0 on success, 1 on a failure, and 2 on a usage error.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
+
+use crate::client::{Client, ListEntry};
 use crate::store::Stores;
 
 const PRIME: &str = "\
@@ -13,62 +21,189 @@ names a model, a skill, and a gaff profile; the body is the system prompt.
 The profile carries the agent's context, guards, and stop rule.
 Commands:
   kersh init [name]
-  kersh list
-  kersh show <name>
-  kersh check
-  kersh render <name> [--context-file <path>] [prompt]
+  kersh list [--json]
+  kersh show <name> [--json]
+  kersh check [--json]
+  kersh render <name> [--context-file <path|->] [--json] [prompt]
   kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]
   kersh docs
+  kersh --version
+Every command takes --root <dir>. --json prints one JSON object per line.
 ";
 
 const DOCS: &str = include_str!("../docs/kersh.md");
 
-/// Run the CLI. Returns the process exit code.
+/// The program name a multi-call binary passes as the first word.
+const NAME: &str = "kersh";
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "kersh",
+    version,
+    about = "Run declarative agents. An agent file names a model, a skill, and a gaff profile."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Create a kersh root and a starter agent. Existing files are kept.
+    Init {
+        /// The agent to create.
+        #[arg(default_value = "reviewer")]
+        name: String,
+        /// Create the root in this directory instead of the current one.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
+    /// List every agent and its description.
+    List {
+        #[command(flatten)]
+        root: RootArg,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Print an agent's settings and system prompt.
+    Show {
+        /// The agent to show.
+        name: String,
+        #[command(flatten)]
+        root: RootArg,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Check that every agent file loads. Exits 1 when one does not.
+    Check {
+        #[command(flatten)]
+        root: RootArg,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Print the prompt a run would send, without calling the model.
+    Render {
+        /// The agent to render.
+        name: String,
+        /// Read context from this file, or from standard input for `-`.
+        #[arg(long, value_name = "PATH|-")]
+        context_file: Option<PathBuf>,
+        #[command(flatten)]
+        root: RootArg,
+        #[command(flatten)]
+        json: JsonArg,
+        /// The prompt. Put `--` before a prompt that starts with a dash.
+        prompt: Option<String>,
+    },
+    /// Run an agent and print its final answer.
+    Run {
+        /// The agent to run.
+        name: String,
+        /// Read context from this file, or from standard input for `-`.
+        #[arg(long, value_name = "PATH|-")]
+        context_file: Option<PathBuf>,
+        /// Use this kersh root, and run the agent's commands in it.
+        /// The default is the current directory.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+        /// The prompt. Put `--` before a prompt that starts with a dash.
+        prompt: Option<String>,
+    },
+    /// Print the kersh manual.
+    Docs,
+    /// Print a short primer for an agent's context.
+    Prime,
+}
+
+#[derive(Debug, Args)]
+struct RootArg {
+    /// Use this kersh root instead of the nearest one above the current
+    /// directory.
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct JsonArg {
+    /// Print JSON, one object per line.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Run the CLI on `args`, which exclude the program name. One leading
+/// `kersh` word is dropped, so a multi-call binary or a link named
+/// `kersh` dispatches the same commands. Returns the exit code.
 #[must_use]
-pub fn run(args: &[String]) -> ExitCode {
-    let Some((command, rest)) = args.split_first() else {
-        eprintln!("usage: kersh <init|list|show|check|render|run|docs|prime> [args]");
-        return ExitCode::FAILURE;
+pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|first| first == NAME) {
+        args.next();
+    }
+    let cli = match Cli::try_parse_from(std::iter::once(OsString::from(NAME)).chain(args)) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // clap sends help and the version to stdout with exit 0, and a
+            // usage error to stderr with exit 2.
+            let _ = error.print();
+            return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2));
+        }
     };
-    let command = command.as_str();
+    dispatch(cli.command)
+}
+
+fn dispatch(command: Command) -> ExitCode {
     match command {
-        "init" => init(rest),
-        "list" => list(rest),
-        "show" => show(rest),
-        "check" => check(rest),
-        "render" => render(rest),
-        "run" => run_agent(rest),
-        "docs" => {
+        Command::Init { name, root } => init(&name, root),
+        Command::List { root, json } => list(&client(root.root.as_deref()), json.json),
+        Command::Show { name, root, json } => show(&client(root.root.as_deref()), &name, json.json),
+        Command::Check { root, json } => check(&client(root.root.as_deref()), json.json),
+        Command::Render {
+            name,
+            context_file,
+            root,
+            json,
+            prompt,
+        } => render(
+            &client(root.root.as_deref()),
+            &name,
+            context_file.as_deref(),
+            prompt.as_deref().unwrap_or_default(),
+            json.json,
+        ),
+        Command::Run {
+            name,
+            context_file,
+            root,
+            prompt,
+        } => run_agent(
+            &name,
+            context_file.as_deref(),
+            root,
+            prompt.as_deref().unwrap_or_default(),
+        ),
+        Command::Docs => {
             print!("{DOCS}");
             ExitCode::SUCCESS
         }
-        "prime" => {
+        Command::Prime => {
             print!("{PRIME}");
             ExitCode::SUCCESS
         }
-        "-h" | "--help" | "help" => {
-            println!("usage: kersh <list|show|check|render|run|docs|prime> [args]");
-            ExitCode::SUCCESS
-        }
-        other => fail(&format!("unknown command `{other}`")),
     }
 }
 
-/// `kersh init [name]` — scaffold a kersh root in the current directory.
+/// `kersh init [name]` — scaffold a kersh root.
 ///
 /// Write `kersh.yml` when it is absent, then `agents/<name>/AGENT.md` from
 /// a template when it is absent. Never overwrite a file, so a re-run is
-/// safe. `name` defaults to `reviewer`, and `--root` picks a directory
-/// other than the current one.
-fn init(rest: &[String]) -> ExitCode {
-    let name = positional(rest).unwrap_or_else(|| "reviewer".to_owned());
+/// safe.
+fn init(name: &str, root: Option<PathBuf>) -> ExitCode {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
         return fail(&format!(
             "`{name}` is not a valid agent name; use a single directory name"
         ));
     }
-    let root = flag_value(rest, "--root")
-        .map(PathBuf::from)
+    let root = root
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
@@ -84,14 +219,14 @@ fn init(rest: &[String]) -> ExitCode {
         created.push("kersh.yml".to_owned());
     }
 
-    let agent_dir = root.join("agents").join(&name);
+    let agent_dir = root.join("agents").join(name);
     let agent_file = agent_dir.join("AGENT.md");
     let rel = format!("agents/{name}/AGENT.md");
     if agent_file.exists() {
         present.push(rel);
     } else if let Err(error) = std::fs::create_dir_all(&agent_dir) {
         return fail(&format!("cannot create {}: {error}", agent_dir.display()));
-    } else if let Err(error) = std::fs::write(&agent_file, agent_template(&name)) {
+    } else if let Err(error) = std::fs::write(&agent_file, agent_template(name)) {
         return fail(&format!("cannot write {rel}: {error}"));
     } else {
         created.push(rel);
@@ -130,133 +265,174 @@ fn agent_template(name: &str) -> String {
     )
 }
 
-/// Resolve the stores from `--root` or by discovery.
-fn stores(rest: &[String]) -> Stores {
-    if let Some(root) = flag_value(rest, "--root") {
-        return Stores::from_root(PathBuf::from(root));
+/// The stores for `--root`, or found from the current directory.
+fn stores(root: Option<&Path>) -> Stores {
+    if let Some(root) = root {
+        return Stores::from_root(root.to_path_buf());
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::store::user_home();
     Stores::discover(&cwd, home.as_deref())
 }
 
-fn list(rest: &[String]) -> ExitCode {
-    let stores = stores(rest);
-    let names = stores.names();
-    if names.is_empty() {
+fn client(root: Option<&Path>) -> Client {
+    Client::new(stores(root))
+}
+
+/// Print `value` as one JSON line.
+fn print_json(value: &impl Serialize) -> Result<(), String> {
+    let line =
+        serde_json::to_string(value).map_err(|error| format!("cannot write the JSON: {error}"))?;
+    println!("{line}");
+    Ok(())
+}
+
+fn list(client: &Client, json: bool) -> ExitCode {
+    let entries = client.list();
+    if json {
+        for entry in &entries {
+            if let Err(error) = print_json(entry) {
+                return fail(&error);
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    if entries.is_empty() {
         println!("no agents. Add agents/<name>/AGENT.md under a kersh.yml root.");
         return ExitCode::SUCCESS;
     }
-    for name in names {
-        match stores.load(&name) {
-            Ok(agent) if !agent.meta.description.is_empty() => {
-                println!("{name}  {}", agent.meta.description);
+    for entry in entries {
+        match entry {
+            ListEntry::Agent(agent) if !agent.description.is_empty() => {
+                println!("{}  {}", agent.name, agent.description);
             }
-            _ => println!("{name}"),
+            ListEntry::Agent(agent) => println!("{}", agent.name),
+            ListEntry::Broken(broken) => println!("{}", broken.name),
         }
     }
     ExitCode::SUCCESS
 }
 
-fn show(rest: &[String]) -> ExitCode {
-    let Some(name) = positional(rest) else {
-        return fail("usage: kersh show <name>");
-    };
-    let stores = stores(rest);
-    match stores.load(&name) {
-        Ok(agent) => {
-            println!("name:    {}", agent.meta.name);
-            println!("model:   {}", agent.meta.model);
-            if let Some(skill) = &agent.meta.skill {
-                println!("skill:   {skill}");
-            }
-            if let Some(profile) = &agent.meta.profile {
-                println!("profile: {profile}");
-            }
-            println!("turns:   {}", agent.meta.max_turns);
-            println!("timeout: {:?}", agent.meta.timeout.0);
-            println!("---\n{}", agent.body);
-            ExitCode::SUCCESS
-        }
-        Err(error) => fail(&error.to_string()),
-    }
-}
-
-fn check(rest: &[String]) -> ExitCode {
-    let stores = stores(rest);
-    let names = stores.names();
-    let mut problems = Vec::new();
-    for name in &names {
-        if let Err(error) = stores.load(name) {
-            problems.push(error.to_string());
-        }
-    }
-    if problems.is_empty() {
-        println!("ok: {} agent(s)", names.len());
-        ExitCode::SUCCESS
-    } else {
-        for problem in &problems {
-            eprintln!("kersh: {problem}");
-        }
-        ExitCode::FAILURE
-    }
-}
-
-fn render(rest: &[String]) -> ExitCode {
-    let Some(name) = positional(rest) else {
-        return fail("usage: kersh render <name> [--context-file <path>] [prompt]");
-    };
-    let stores = stores(rest);
-    let agent = match stores.load(&name) {
+fn show(client: &Client, name: &str, json: bool) -> ExitCode {
+    let agent = match client.show(name) {
         Ok(agent) => agent,
         Err(error) => return fail(&error.to_string()),
     };
-    let context = match flag_value(rest, "--context-file") {
-        Some(path) => match read_context(&path) {
-            Ok(text) => Some(text),
-            Err(error) => return fail(&error),
-        },
-        None => None,
+    if json {
+        return print_json(&agent).map_or_else(|error| fail(&error), |()| ExitCode::SUCCESS);
+    }
+    println!("name:    {}", agent.name);
+    println!("model:   {}", agent.model);
+    if let Some(skill) = &agent.skill {
+        println!("skill:   {skill}");
+    }
+    if let Some(profile) = &agent.profile {
+        println!("profile: {profile}");
+    }
+    println!("turns:   {}", agent.max_turns);
+    println!(
+        "timeout: {:?}",
+        std::time::Duration::from_secs(agent.timeout_secs)
+    );
+    println!("---\n{}", agent.body);
+    ExitCode::SUCCESS
+}
+
+/// One line of `kersh check --json`: a problem, or the closing summary.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CheckLine<'a> {
+    Problem {
+        name: &'a str,
+        path: &'a Path,
+        error: &'a str,
+    },
+    Summary {
+        agents: usize,
+        problems: usize,
+        ok: bool,
+    },
+}
+
+fn check(client: &Client, json: bool) -> ExitCode {
+    let report = client.check();
+    let code = if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     };
-    let prompt = positional_after(rest, &name).unwrap_or_default();
-    let skill = match skill_body(&agent) {
-        Ok(skill) => skill,
+    if json {
+        let problems = report.problems.iter().map(|problem| CheckLine::Problem {
+            name: &problem.name,
+            path: &problem.path,
+            error: &problem.error,
+        });
+        let summary = CheckLine::Summary {
+            agents: report.agents,
+            problems: report.problems.len(),
+            ok: report.ok(),
+        };
+        for line in problems.chain(std::iter::once(summary)) {
+            if let Err(error) = print_json(&line) {
+                return fail(&error);
+            }
+        }
+        return code;
+    }
+    if report.ok() {
+        println!("ok: {} agent(s)", report.agents);
+    } else {
+        for problem in &report.problems {
+            eprintln!("kersh: {}", problem.error);
+        }
+    }
+    code
+}
+
+fn render(
+    client: &Client,
+    name: &str,
+    context_file: Option<&Path>,
+    prompt: &str,
+    json: bool,
+) -> ExitCode {
+    let context = match context_file.map(read_context).transpose() {
+        Ok(context) => context,
         Err(error) => return fail(&error),
     };
-    let composed = crate::compose::compose(
-        &agent,
-        skill.as_deref(),
-        context.as_deref(),
-        &prompt,
-        &crate::util::nonce(),
-    );
-    println!("=== system prompt ===\n{}\n", composed.system);
-    println!("=== first user turn ===\n{}", composed.first_turn);
+    let rendered = match client.render(name, context.as_deref(), prompt) {
+        Ok(rendered) => rendered,
+        Err(error) => return fail(&error.to_string()),
+    };
+    if json {
+        return print_json(&rendered).map_or_else(|error| fail(&error), |()| ExitCode::SUCCESS);
+    }
+    println!("=== system prompt ===\n{}\n", rendered.system);
+    println!("=== first user turn ===\n{}", rendered.first_turn);
     ExitCode::SUCCESS
 }
 
 /// `kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]`.
 ///
 /// The agent runs through rig against the provider its `model` names.
-/// The final text goes to standard output. The tools are confined to the
-/// current directory, or `--root`.
-fn run_agent(rest: &[String]) -> ExitCode {
-    let Some(name) = positional(rest) else {
-        return fail("usage: kersh run <name> [--context-file <path>] [prompt]");
-    };
-    let stores = stores(rest);
-    let agent = match stores.load(&name) {
+/// The final text goes to standard output and nothing else does, because
+/// gaff reads a hook agent's verdict from that stream. The tools are
+/// confined to the current directory, or `--root`.
+fn run_agent(
+    name: &str,
+    context_file: Option<&Path>,
+    root: Option<PathBuf>,
+    prompt: &str,
+) -> ExitCode {
+    let stores = stores(root.as_deref());
+    let agent = match stores.load(name) {
         Ok(agent) => agent,
         Err(error) => return fail(&error.to_string()),
     };
-    let context = match flag_value(rest, "--context-file") {
-        Some(path) => match read_context(&path) {
-            Ok(text) => Some(text),
-            Err(error) => return fail(&error),
-        },
-        None => None,
+    let context = match context_file.map(read_context).transpose() {
+        Ok(context) => context,
+        Err(error) => return fail(&error),
     };
-    let prompt = positional_after(rest, &name).unwrap_or_default();
     // An agent with a profile takes its situation from gaff's session-start
     // injection, so it needs no prompt on the command line. Without a
     // profile, the caller supplies the situation as a prompt or a context
@@ -265,8 +441,7 @@ fn run_agent(rest: &[String]) -> ExitCode {
         return fail("give a prompt, or context with --context-file");
     }
 
-    let root_dir = flag_value(rest, "--root")
-        .map(PathBuf::from)
+    let root_dir = root
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let root = match crate::tools::Root::new(&root_dir) {
@@ -302,7 +477,7 @@ fn run_agent(rest: &[String]) -> ExitCode {
     // The agent's almanac skill is its method, resolved before the run. A
     // named skill that cannot resolve aborts, so a run never silently drops
     // the agent's method.
-    let skill = match skill_body(&agent) {
+    let skill = match crate::client::skill_body(&agent) {
         Ok(skill) => skill,
         Err(error) => return fail(&error),
     };
@@ -314,7 +489,7 @@ fn run_agent(rest: &[String]) -> ExitCode {
         &agent,
         skill.as_deref(),
         combined.as_deref(),
-        &prompt,
+        prompt,
         &crate::util::nonce(),
     );
 
@@ -325,7 +500,7 @@ fn run_agent(rest: &[String]) -> ExitCode {
     // the cause. The earlier guard cannot catch this: gaff answers the
     // injection at run time, not before.
     if let Err(message) =
-        situation_present(&composed.first_turn, agent.meta.profile.as_deref(), &name)
+        situation_present(&composed.first_turn, agent.meta.profile.as_deref(), name)
     {
         return fail(&message);
     }
@@ -343,17 +518,6 @@ fn run_agent(rest: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error.to_string()),
-    }
-}
-
-/// Resolve the agent's almanac skill body, if it names one. An agent
-/// without a `skill` resolves to `None`; a named skill that almanac
-/// cannot resolve is an error, so the run aborts rather than dropping the
-/// method.
-fn skill_body(agent: &crate::agent::Agent) -> Result<Option<String>, String> {
-    match &agent.meta.skill {
-        None => Ok(None),
-        Some(name) => crate::skill::resolve(name).map(Some),
     }
 }
 
@@ -389,8 +553,8 @@ fn situation_present(first_turn: &str, profile: Option<&str>, name: &str) -> Res
 }
 
 /// Read `--context-file`, where `-` means standard input.
-fn read_context(path: &str) -> Result<String, String> {
-    if path == "-" {
+fn read_context(path: &Path) -> Result<String, String> {
+    if path == Path::new("-") {
         use std::io::Read as _;
         let mut buf = String::new();
         std::io::stdin()
@@ -398,7 +562,8 @@ fn read_context(path: &str) -> Result<String, String> {
             .map_err(|error| format!("cannot read standard input: {error}"))?;
         Ok(buf)
     } else {
-        std::fs::read_to_string(path).map_err(|error| format!("cannot read `{path}`: {error}"))
+        std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read `{}`: {error}", path.display()))
     }
 }
 
@@ -407,80 +572,25 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The value after `flag`, if present.
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-}
-
-/// The first positional argument (not a flag or a flag value). Everything
-/// after a `--` separator is positional, so a value may start with a dash.
-fn positional(args: &[String]) -> Option<String> {
-    let mut skip_next = false;
-    let mut end_of_flags = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if !end_of_flags && arg == "--" {
-            end_of_flags = true;
-            continue;
-        }
-        if !end_of_flags && arg.starts_with('-') {
-            skip_next = takes_value(arg);
-            continue;
-        }
-        return Some(arg.clone());
-    }
-    None
-}
-
-/// The first positional after the one equal to `first`, so `render <name>
-/// <prompt>` finds the prompt. A `--` separator makes the rest positional,
-/// so a prompt may start with a dash: `render x -- -fix it`.
-fn positional_after(args: &[String], first: &str) -> Option<String> {
-    let mut seen_first = false;
-    let mut skip_next = false;
-    let mut end_of_flags = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if !end_of_flags && arg == "--" {
-            end_of_flags = true;
-            continue;
-        }
-        if !end_of_flags && arg.starts_with('-') {
-            skip_next = takes_value(arg);
-            continue;
-        }
-        if !seen_first && arg == first {
-            seen_first = true;
-            continue;
-        }
-        if seen_first {
-            return Some(arg.clone());
-        }
-    }
-    None
-}
-
-/// Whether a flag consumes the following argument.
-fn takes_value(flag: &str) -> bool {
-    matches!(flag, "--root" | "--context-file")
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
-    fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| (*s).to_string()).collect()
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    fn parse(list: &[&str]) -> Command {
+        Cli::try_parse_from(std::iter::once(NAME).chain(list.iter().copied()))
+            .unwrap()
+            .command
+    }
+
+    #[test]
+    fn the_parser_is_well_formed() {
+        use clap::CommandFactory as _;
+        Cli::command().debug_assert();
     }
 
     #[test]
@@ -518,8 +628,7 @@ mod tests {
     fn list_succeeds_and_the_store_resolves_the_agent() {
         let tmp = root_with_agent();
         let root = tmp.path().to_str().unwrap();
-        assert_eq!(list(&args(&["--root", root])), ExitCode::SUCCESS);
-        // The logic list depends on: the store names and loads the agent.
+        assert_eq!(main(args(&["list", "--root", root])), ExitCode::SUCCESS);
         let stores = Stores::from_root(PathBuf::from(root));
         assert_eq!(stores.names(), vec!["reviewer".to_string()]);
         assert!(stores.load("reviewer").is_ok());
@@ -529,7 +638,10 @@ mod tests {
     fn init_scaffolds_a_root_and_a_valid_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_str().unwrap();
-        assert_eq!(init(&args(&["--root", root, "auditor"])), ExitCode::SUCCESS);
+        assert_eq!(
+            main(args(&["init", "--root", root, "auditor"])),
+            ExitCode::SUCCESS
+        );
         assert!(tmp.path().join("kersh.yml").exists());
         // The template it writes parses, so `check` passes at once.
         let stores = Stores::from_root(PathBuf::from(root));
@@ -541,7 +653,7 @@ mod tests {
     fn init_never_overwrites_an_edited_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_str().unwrap();
-        init(&args(&["--root", root]));
+        let _ = main(args(&["init", "--root", root]));
         let agent = tmp.path().join("agents").join("reviewer").join("AGENT.md");
         std::fs::write(
             &agent,
@@ -549,7 +661,7 @@ mod tests {
         )
         .unwrap();
         // A second init leaves the edited file alone.
-        assert_eq!(init(&args(&["--root", root])), ExitCode::SUCCESS);
+        assert_eq!(main(args(&["init", "--root", root])), ExitCode::SUCCESS);
         assert!(std::fs::read_to_string(&agent).unwrap().contains("mine"));
     }
 
@@ -557,25 +669,47 @@ mod tests {
     fn init_refuses_a_traversing_name() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_str().unwrap();
-        assert_eq!(init(&args(&["--root", root, "../evil"])), ExitCode::FAILURE);
+        assert_eq!(
+            main(args(&["init", "--root", root, "../evil"])),
+            ExitCode::FAILURE
+        );
         assert!(!tmp.path().join("agents").join("..").exists());
     }
 
     #[test]
     fn a_double_dash_lets_a_prompt_start_with_a_dash() {
-        let a = args(&["reviewer", "--root", "/r", "--", "-fix the tests"]);
-        assert_eq!(positional(&a).as_deref(), Some("reviewer"));
-        assert_eq!(
-            positional_after(&a, "reviewer").as_deref(),
-            Some("-fix the tests")
-        );
+        let Command::Run {
+            name, root, prompt, ..
+        } = parse(&["run", "reviewer", "--root", "/r", "--", "-fix the tests"])
+        else {
+            panic!("not a run");
+        };
+        assert_eq!(name, "reviewer");
+        assert_eq!(root, Some(PathBuf::from("/r")));
+        assert_eq!(prompt.as_deref(), Some("-fix the tests"));
+    }
+
+    #[test]
+    fn flags_may_follow_the_name_and_the_prompt() {
+        let Command::Run {
+            name,
+            context_file,
+            prompt,
+            ..
+        } = parse(&["run", "reviewer", "review it", "--context-file", "-"])
+        else {
+            panic!("not a run");
+        };
+        assert_eq!(name, "reviewer");
+        assert_eq!(context_file, Some(PathBuf::from("-")));
+        assert_eq!(prompt.as_deref(), Some("review it"));
     }
 
     #[test]
     fn check_passes_on_a_good_store_and_fails_on_a_bad_one() {
         let tmp = root_with_agent();
         let root = tmp.path().to_str().unwrap();
-        assert_eq!(check(&args(&["--root", root])), ExitCode::SUCCESS);
+        assert_eq!(main(args(&["check", "--root", root])), ExitCode::SUCCESS);
 
         // A file whose name does not match its directory is a problem.
         let bad = tmp.path().join("agents").join("broken");
@@ -585,17 +719,23 @@ mod tests {
             "---\nname: other\nmodel: claude-code/haiku\n---\nb\n",
         )
         .unwrap();
-        assert_eq!(check(&args(&["--root", root])), ExitCode::FAILURE);
+        assert_eq!(main(args(&["check", "--root", root])), ExitCode::FAILURE);
     }
 
     #[test]
-    fn unknown_command_fails_without_panicking() {
-        assert_eq!(run(&args(&["frobnicate"])), ExitCode::FAILURE);
+    fn an_unknown_command_is_a_usage_error() {
+        assert_eq!(main(args(&["frobnicate"])), ExitCode::from(2));
+    }
+
+    #[test]
+    fn a_leading_kersh_word_is_dropped_once() {
+        assert_eq!(main(args(&["kersh", "prime"])), ExitCode::SUCCESS);
+        assert_eq!(main(args(&["kersh", "kersh", "prime"])), ExitCode::from(2));
     }
 
     #[test]
     fn docs_and_prime_succeed() {
-        assert_eq!(run(&args(&["docs"])), ExitCode::SUCCESS);
-        assert_eq!(run(&args(&["prime"])), ExitCode::SUCCESS);
+        assert_eq!(main(args(&["docs"])), ExitCode::SUCCESS);
+        assert_eq!(main(args(&["prime"])), ExitCode::SUCCESS);
     }
 }

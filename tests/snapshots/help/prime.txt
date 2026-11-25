@@ -1,0 +1,6 @@
+Print a short primer for an agent's context
+
+Usage: kersh prime
+
+Options:
+  -h, --help  Print help
