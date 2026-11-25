@@ -1,0 +1,6 @@
+# One Rust version for local runs and CI, so a local green is a CI
+# green. Raise it deliberately and fix what the new version finds in the
+# same commit.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
