@@ -862,18 +862,23 @@ fn load_run_agent(args: &RunArgs) -> Result<crate::agent::Agent, String> {
 
 /// Refuse an agent whose runtime names another harness: `kersh run` runs
 /// rig in this process, and `kersh start` hosts the others.
+///
+/// Only a runtime found on this machine that names another harness
+/// refuses. gaff's hook agents run `kersh run` with a cleared environment
+/// on any machine, so a missing runtime, a missing runtimes.yml, or one
+/// that does not parse is not known to be another harness, and the run
+/// goes ahead from the agent file's model.
 fn check_rig_harness(agent: &crate::agent::Agent) -> Result<(), String> {
     let Some(runtime) = &agent.meta.runtime else {
         return Ok(());
     };
     let name = &agent.meta.name;
-    let runtimes = crate::runtime::load_runtimes(&crate::paths::Paths::discover())?;
-    let resolved = crate::runtime::resolve(
-        Some(agent),
-        &runtimes,
-        &crate::session::StartRequest::default(),
-    )?;
-    let harness = resolved.settings.harness;
+    let Ok(runtimes) = crate::runtime::load_runtimes(&crate::paths::Paths::discover()) else {
+        return Ok(());
+    };
+    let Some(harness) = runtimes.get(runtime).and_then(|found| found.harness) else {
+        return Ok(());
+    };
     if harness != Harness::Rig {
         return Err(format!(
             "`{name}` runs on the {harness} harness (runtime `{runtime}`), not rig; \

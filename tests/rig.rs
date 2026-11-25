@@ -158,6 +158,35 @@ fn run_refuses_an_agent_whose_harness_is_not_rig_naming_kersh_start() {
     assert!(error.contains("`kersh start coder`"), "{error}");
 }
 
+/// gaff's hook agents run `kersh run` with a cleared environment, so a
+/// runtime this machine does not define is not known to be another
+/// harness: the run goes ahead from the agent file's model.
+#[test]
+fn run_goes_ahead_when_the_agent_runtime_is_not_defined_here() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_agent(tmp.path(), "hook", "runtime: elsewhere\n");
+    let output = run(tmp.path(), &["run", "hook", "go"], TOOL_THEN_TEXT);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "all done\n");
+}
+
+#[test]
+fn run_goes_ahead_when_runtimes_yml_is_invalid() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_agent(tmp.path(), "hook", "runtime: elsewhere\n");
+    let config = tmp.path().join(".config/kersh");
+    std::fs::create_dir_all(&config).unwrap();
+    for yaml in [
+        "elsewhere:\n  env:\n    PATH: /tmp\n",
+        "elsewhere: [not, a, runtime\n",
+    ] {
+        std::fs::write(config.join("runtimes.yml"), yaml).unwrap();
+        let output = run(tmp.path(), &["run", "hook", "go"], TOOL_THEN_TEXT);
+        assert!(output.status.success(), "{yaml}: {}", stderr(&output));
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "all done\n");
+    }
+}
+
 /// A kersh root in the working directory with a rig agent on the
 /// runtime `name`, whose environment carries `script`.
 fn rig_agent(env: &Env, name: &str, script: Option<&str>) {
