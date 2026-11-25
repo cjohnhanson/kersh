@@ -25,6 +25,12 @@ command -v missouri >/dev/null || {
 	echo "  cargo install --locked --git https://github.com/cjohnhanson/missouri" >&2
 	exit 1
 }
+# The suites run `kersh` from PATH. Under the preinstalled sandbox
+# missouri skips the suite's own build step, so build the fake-model
+# binary here and put it first on PATH in both modes.
+cargo build --quiet --features fake-model
+PATH="$(pwd)/target/debug:$PATH"
+export PATH
 echo "test: missouri run"
 out=$(cd tests/missouri && missouri run </dev/null 2>&1) || {
 	echo "test: the missouri suite failed." >&2
