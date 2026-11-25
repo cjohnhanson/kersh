@@ -14,13 +14,17 @@
 
 pub mod agent;
 pub mod cli;
+pub mod client;
 pub mod compose;
 #[cfg(feature = "fake-model")]
 pub mod fake_model;
 pub mod gaff;
 pub mod hook;
 pub mod model;
+pub mod sessions;
 pub mod skill;
 pub mod store;
 pub mod tools;
 pub mod util;
+
+pub use client::Client;

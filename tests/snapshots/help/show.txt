@@ -1,0 +1,11 @@
+Print an agent's settings and system prompt
+
+Usage: kersh show [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The agent to show
+
+Options:
+      --root <DIR>  Use this kersh root instead of the nearest one above the current directory
+      --json        Print JSON, one object per line
+  -h, --help        Print help

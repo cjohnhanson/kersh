@@ -1,0 +1,69 @@
+# The review a change must pass before it merges. The name is a skill
+# vendored into .agents/skills by almanac. One reader, an agent that did
+# not write the change, reads the CI-green head against it and adds a
+# line for each other vendored criterion the change touches (AGENTS.md,
+# "Review").
+reviews:
+  - review-code
+
+# The commit gate holds formatted code and a clean clippy. The merge
+# gate holds the tests, the missouri suite, the seam against a real
+# gaff, and the review note.
+git:
+  - name: commit-gate
+    on:
+      - pre-commit
+    command:
+      - sh
+      - scripts/commit-gate.sh
+  - name: merge-gate
+    on:
+      - pre-push
+    command:
+      - sh
+      - scripts/merge-gate.sh
+
+# The CI gate: the same declarations, run by gaff ci on every pull
+# request. Branch protection on main requires this check.
+github:
+  - name: gate
+    # A pull request only: a squash merge writes a commit no reviewer
+    # saw, so a run on main would ask for a note that cannot exist.
+    on:
+      - pull_request
+    steps:
+      - name: fetch review notes
+        command: [sh, -c, "git fetch origin +refs/notes/reviews:refs/notes/reviews || true"]
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy, rustfmt
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: install missouri
+        uses: cjohnhanson/missouri@main
+      - name: gaff
+        uses: cjohnhanson/gaff@main
+
+  # A push runs the lints and the suites without the review check, so a
+  # merge that breaks main is visible.
+  - name: verify
+    on:
+      - push
+    steps:
+      - name: rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy, rustfmt
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: install missouri
+        uses: cjohnhanson/missouri@main
+      # `run: false`: the action runs `gaff ci` by default, which is the
+      # review check. verify needs only the binary the seam drives.
+      - name: gaff
+        uses: cjohnhanson/gaff@main
+        with:
+          run: "false"
+      - name: lint and test
+        command: [sh, -c, "sh scripts/commit-gate.sh && sh scripts/test.sh"]

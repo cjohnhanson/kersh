@@ -147,6 +147,9 @@ impl rig::completion::GetTokenUsage for FakeRaw {
     }
 }
 
+// The trait declares these methods async; the fake answers at once, so
+// neither body awaits anything.
+#[allow(clippy::unused_async_trait_impl)]
 impl CompletionModel for FakeModel {
     type Response = FakeRaw;
     type StreamingResponse = FakeRaw;

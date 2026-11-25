@@ -1,0 +1,18 @@
+Run declarative agents. An agent file names a model, a skill, and a gaff profile.
+
+Usage: kersh <COMMAND>
+
+Commands:
+  init    Create a kersh root and a starter agent. Existing files are kept
+  list    List every agent and its description
+  show    Print an agent's settings and system prompt
+  check   Check that every agent file loads. Exits 1 when one does not
+  render  Print the prompt a run would send, without calling the model
+  run     Run an agent and print its final answer
+  docs    Print the kersh manual
+  prime   Print a short primer for an agent's context
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version

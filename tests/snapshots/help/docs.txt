@@ -1,0 +1,6 @@
+Print the kersh manual
+
+Usage: kersh docs
+
+Options:
+  -h, --help  Print help

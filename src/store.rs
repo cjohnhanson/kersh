@@ -52,8 +52,10 @@ impl Stores {
         self.dirs.first().map(PathBuf::as_path)
     }
 
-    /// The path to an agent file, searching the stores in order.
-    fn agent_path(&self, name: &str) -> Option<PathBuf> {
+    /// The path to an agent file, searching the stores in order. `None`
+    /// when no store has the name or the name could traverse.
+    #[must_use]
+    pub fn agent_path(&self, name: &str) -> Option<PathBuf> {
         if !is_single_component(name) {
             return None;
         }
@@ -96,6 +98,31 @@ impl Stores {
         names.sort();
         names
     }
+}
+
+/// The current user's home directory, for the user-level store.
+///
+/// gaff runs hook agents with a cleared environment, so `HOME` is often
+/// unset there. A non-empty `HOME` wins; otherwise the user database
+/// answers. `std::env::home_dir` reads the user database (`getpwuid_r`)
+/// on Unix when `HOME` is unset or empty.
+#[must_use]
+pub fn user_home() -> Option<PathBuf> {
+    choose_home(std::env::var_os("HOME"), std::env::home_dir)
+}
+
+/// Pick the home directory: a non-empty `HOME`, else the user database's
+/// answer. An empty answer from either is no home, so the store never
+/// resolves `.config/kersh` against the working directory.
+fn choose_home(
+    env_home: Option<std::ffi::OsString>,
+    user_db: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    env_home
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(user_db)
+        .filter(|home| !home.as_os_str().is_empty())
 }
 
 /// Whether `name` is a single normal path component, so it cannot
@@ -167,6 +194,28 @@ mod tests {
         std::fs::write(tmp.path().join(ROOT_MARKER), "").unwrap();
         let stores = Stores::discover(tmp.path(), None);
         assert!(matches!(stores.load("nope"), Err(LoadError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_set_home_wins_without_asking_the_user_database() {
+        let home = choose_home(Some("/home/a".into()), || panic!("not consulted"));
+        assert_eq!(home, Some(PathBuf::from("/home/a")));
+    }
+
+    #[test]
+    fn an_unset_or_empty_home_falls_back_to_the_user_database() {
+        let db = || Some(PathBuf::from("/var/db/a"));
+        assert_eq!(choose_home(None, db), Some(PathBuf::from("/var/db/a")));
+        assert_eq!(
+            choose_home(Some("".into()), db),
+            Some(PathBuf::from("/var/db/a"))
+        );
+    }
+
+    #[test]
+    fn an_empty_user_database_answer_is_no_home() {
+        assert_eq!(choose_home(None, || Some(PathBuf::new())), None);
+        assert_eq!(choose_home(None, || None), None);
     }
 
     #[test]

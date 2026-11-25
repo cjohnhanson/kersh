@@ -1,0 +1,12 @@
+Run an agent and print its final answer
+
+Usage: kersh run [OPTIONS] <NAME> [PROMPT]
+
+Arguments:
+  <NAME>    The agent to run
+  [PROMPT]  The prompt. Put `--` before a prompt that starts with a dash
+
+Options:
+      --context-file <PATH|->  Read context from this file, or from standard input for `-`
+      --root <DIR>             Use this kersh root, and run the agent's commands in it. The default is the current directory
+  -h, --help                   Print help

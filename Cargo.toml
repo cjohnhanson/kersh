@@ -36,6 +36,17 @@ getrandom = "0.3"
 rig-core = { version = "0.41", default-features = false }
 rig = "0.41"
 rig-claude-code = { git = "https://github.com/cjohnhanson/rig-claude-code", rev = "c0db1f69e630a2d2a27b276b8e41afdb77a1f938", version = "0.1.0" }
+clap = { version = "4.6", features = ["derive"] }
+# The terminal sessions, behind the `Sessions` trait in src/sessions.rs.
+# Pinned exactly: an upgrade is its own change with the gates rerun. The
+# server's default `web` feature adds a TCP share listener, so it is off.
+# rmux-client turns on rmux-sdk's `web` feature, which adds only the
+# client calls for that listener; with the server feature off, no
+# listener exists to reach.
+rmux-sdk = { version = "=0.10.0", default-features = false }
+rmux-client = { version = "=0.10.0", default-features = false }
+rmux-proto = { version = "=0.10.0", default-features = false }
+rmux-server = { version = "=0.10.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
