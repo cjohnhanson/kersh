@@ -22,7 +22,7 @@ transitions:
       chmod +x "$T/gaff"
 
       script='[{"kind":"echo_prompt"}]'
-      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+      OUT=$(KERSH_GAFF="$T/gaff" FAKE_MODEL_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review the notes" 2>&1)
       code=$?
 

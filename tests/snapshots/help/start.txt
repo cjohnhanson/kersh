@@ -8,7 +8,7 @@ Arguments:
 
 Options:
       --runtime <NAME>            A runtime from runtimes.yml, over the agent's own
-      --harness <HARNESS>         claude-code or codex
+      --harness <HARNESS>         rig, claude-code, or codex
       --mode <MODE>               headless or interactive
       --model <MODEL>             The harness's model
       --skill <SKILL>             Replace the agent's almanac skill

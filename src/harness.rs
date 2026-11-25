@@ -49,6 +49,19 @@ pub struct LaunchSpec<'a> {
     pub conversation: Conversation<'a>,
     /// An interactive session's prompt, passed as its argument.
     pub prompt_arg: Option<&'a str>,
+    /// What a rig session runs; `None` for the other harnesses.
+    pub rig: Option<RigRun<'a>>,
+}
+
+/// A rig session's run: `kersh run --output jsonl` of its agent file.
+#[derive(Debug, Clone, Copy)]
+pub struct RigRun<'a> {
+    /// The running kersh's entry argv, never one found on `PATH`.
+    pub entry: &'a [String],
+    pub agent: &'a str,
+    pub agent_file: &'a Path,
+    /// The gaff profile the session resolved.
+    pub profile: Option<&'a str>,
 }
 
 /// The argument vector for a launch. A headless launch reads its prompt
@@ -58,7 +71,40 @@ pub fn argv(spec: &LaunchSpec<'_>) -> Vec<String> {
     match spec.harness {
         Harness::ClaudeCode => claude_argv(spec),
         Harness::Codex => codex_argv(spec),
-        Harness::Rig => vec![spec.program.display().to_string()],
+        Harness::Rig => rig_argv(spec),
+    }
+}
+
+fn rig_argv(spec: &LaunchSpec<'_>) -> Vec<String> {
+    let Some(rig) = spec.rig else {
+        return vec![spec.program.display().to_string()];
+    };
+    let mut argv = rig.entry.to_vec();
+    argv.extend([
+        "run".to_owned(),
+        rig.agent.to_owned(),
+        "--output".to_owned(),
+        "jsonl".to_owned(),
+        "--agent-file".to_owned(),
+        rig.agent_file.display().to_string(),
+    ]);
+    if let Some(path) = spec.system_prompt {
+        argv.extend(["--system-file".to_owned(), path.display().to_string()]);
+    }
+    if let Some(profile) = rig.profile {
+        argv.extend(["--profile".to_owned(), profile.to_owned()]);
+    }
+    argv.extend(["--prompt-file".to_owned(), "-".to_owned()]);
+    argv
+}
+
+/// The build a rig session runs: this kersh, by its entry argv.
+#[must_use]
+pub fn rig_build(entry: &[String]) -> Build {
+    Build {
+        installer: "entry".to_owned(),
+        path: PathBuf::from(entry.first().map_or("kersh", String::as_str)),
+        version: format!("kersh {}", env!("CARGO_PKG_VERSION")),
     }
 }
 
@@ -416,7 +462,42 @@ mod tests {
             flags: &[],
             conversation,
             prompt_arg: Some("go"),
+            rig: None,
         }
+    }
+
+    #[test]
+    fn rig_runs_this_kersh_with_jsonl_output_and_the_prompt_on_stdin() {
+        let entry = strings(&["/opt/kersh", "kersh"]);
+        let mut rig = spec(Harness::Rig, Mode::Headless, Conversation::New(None));
+        rig.rig = Some(RigRun {
+            entry: &entry,
+            agent: "fixer",
+            agent_file: Path::new("/a/agents/fixer/AGENT.md"),
+            profile: Some("worker"),
+        });
+        assert_eq!(
+            argv(&rig),
+            strings(&[
+                "/opt/kersh",
+                "kersh",
+                "run",
+                "fixer",
+                "--output",
+                "jsonl",
+                "--agent-file",
+                "/a/agents/fixer/AGENT.md",
+                "--system-file",
+                "/s/system.md",
+                "--profile",
+                "worker",
+                "--prompt-file",
+                "-",
+            ])
+        );
+        let build = rig_build(&entry);
+        assert_eq!(build.path, Path::new("/opt/kersh"));
+        assert_eq!(build.installer, "entry");
     }
 
     #[test]

@@ -36,7 +36,7 @@ transitions:
 
       # Discovery from the working directory, HOME unset.
       ( cd "$root" && printf 'diff --git a/x b/x\n' | env -i PATH=/usr/bin:/bin \
-          KERSH_FAKE_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
+          FAKE_MODEL_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
           "$K" run reviewer --context-file - ) > "$T/out" 2> "$T/err"
       code=$?
       [ "$code" = 0 ] || { echo "FAIL: the run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }
@@ -45,7 +45,7 @@ transitions:
 
       # An explicit root from an unrelated working directory.
       ( cd "$T" && printf 'diff --git a/x b/x\n' | env -i PATH=/usr/bin:/bin \
-          KERSH_FAKE_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
+          FAKE_MODEL_SCRIPT="$verdict" KERSH_GAFF="$T/gaff" \
           "$K" run reviewer --root "$root" --context-file - ) > "$T/out" 2> "$T/err"
       code=$?
       [ "$code" = 0 ] || { echo "FAIL: the --root run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }
@@ -53,7 +53,7 @@ transitions:
 
       # The context on standard input reaches the model.
       ( cd "$root" && printf 'STAGED-CHANGE-31\n' | env -i PATH=/usr/bin:/bin \
-          KERSH_FAKE_SCRIPT='[{"kind":"echo_prompt"}]' KERSH_GAFF="$T/gaff" \
+          FAKE_MODEL_SCRIPT='[{"kind":"echo_prompt"}]' KERSH_GAFF="$T/gaff" \
           "$K" run reviewer --context-file - ) > "$T/out" 2> "$T/err"
       code=$?
       [ "$code" = 0 ] || { echo "FAIL: the echo run must exit 0, got $code: $(cat "$T/err")"; rm -rf "$T"; exit 1; }

@@ -26,7 +26,7 @@ transitions:
       chmod +x "$T/gaff"
 
       script='[{"kind":"text","text":"draft one"},{"kind":"text","text":"draft two"},{"kind":"text","text":"final review"},{"kind":"text","text":"spare"}]'
-      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+      OUT=$(KERSH_GAFF="$T/gaff" FAKE_MODEL_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review" 2>&1)
       code=$?
 

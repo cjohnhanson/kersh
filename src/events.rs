@@ -156,8 +156,98 @@ pub fn parse_stdout(harness: Harness, line: &str) -> Parsed {
     match harness {
         Harness::ClaudeCode => parse_claude(value),
         Harness::Codex => parse_codex(value),
-        Harness::Rig => parse_other(value),
+        Harness::Rig => parse_rig(value),
     }
+}
+
+/// One line of `kersh run --output jsonl`: rig's own stream. `type` is
+/// the event kind it becomes, so a rig session reads like any headless
+/// harness.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RigLine {
+    #[serde(rename = "type")]
+    pub kind: Option<EventKind>,
+    /// The agent's name, on `init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The agent's model, on `init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The model call's number, from 1, on `turn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The tool's input, shortened: a shell command as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    /// A tool result's status (`success`, `error`, `refused`), or the
+    /// run's (`success`, `error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+    /// Assistant text, or the run's final text or error on `result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl RigLine {
+    #[must_use]
+    pub fn new(kind: EventKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Self::default()
+        }
+    }
+}
+
+/// A tool's JSON arguments in one line, as an event keeps them.
+#[must_use]
+pub fn tool_input_text(args: &str) -> String {
+    serde_json::from_str::<Value>(args)
+        .map_or_else(|_| shorten(args, INPUT_CHARS), |value| tool_input(&value))
+}
+
+/// rig's `--output jsonl` lines.
+fn parse_rig(value: Value) -> Parsed {
+    let Ok(line) = serde_json::from_value::<RigLine>(value.clone()) else {
+        return parse_other(value);
+    };
+    let Some(kind) = line.kind else {
+        return parse_other(value);
+    };
+    let text = line.text.as_deref().unwrap_or_default();
+    let status = line.status.clone().unwrap_or_default();
+    let summary = match kind {
+        EventKind::Init => format!("init: {}", line.model.as_deref().unwrap_or("unknown model")),
+        EventKind::Turn => match line.turn {
+            Some(turn) => format!("turn {turn}"),
+            None => "turn started".to_owned(),
+        },
+        EventKind::Tool => format!(
+            "tool {}: {}",
+            line.tool.as_deref().unwrap_or("tool"),
+            line.input.as_deref().unwrap_or_default()
+        ),
+        EventKind::ToolResult => match status.as_str() {
+            "success" => "tool result: ok".to_owned(),
+            "" => "tool result".to_owned(),
+            other => format!("tool result: {other}"),
+        },
+        EventKind::Result if line.is_error == Some(true) => {
+            format!("result: {status}: {}", shorten(text, INPUT_CHARS))
+        }
+        EventKind::Result => format!("result: {status}"),
+        EventKind::Error => format!("error: {}", shorten(text, INPUT_CHARS)),
+        EventKind::Text | EventKind::Stderr | EventKind::Other => shorten(text, INPUT_CHARS),
+    };
+    let mut parsed = Parsed::new(kind, summary, value);
+    parsed.tool = line.tool;
+    parsed.input = line.input;
+    parsed.status = line.status;
+    parsed.is_error = line.is_error;
+    parsed
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -608,6 +698,33 @@ mod tests {
         );
         assert_eq!(done.kind, EventKind::Result);
         assert_eq!(done.cost_usd, None, "Codex reports no cost");
+    }
+
+    #[test]
+    fn rig_lines_become_the_same_events_as_the_other_harnesses() {
+        let tool = parse_stdout(
+            Harness::Rig,
+            r#"{"type":"tool","tool":"bash","input":"cargo test"}"#,
+        );
+        assert_eq!(tool.kind, EventKind::Tool);
+        assert_eq!(tool.summary, "tool bash: cargo test");
+        assert_eq!(tool.input.as_deref(), Some("cargo test"));
+        let refused = parse_stdout(
+            Harness::Rig,
+            r#"{"type":"tool_result","tool":"bash","status":"refused","is_error":true}"#,
+        );
+        assert_eq!(refused.kind, EventKind::ToolResult);
+        assert_eq!(refused.summary, "tool result: refused");
+        assert_eq!(refused.is_error, Some(true));
+        let done = parse_stdout(
+            Harness::Rig,
+            r#"{"type":"result","status":"success","is_error":false,"text":"ok"}"#,
+        );
+        assert_eq!(done.kind, EventKind::Result);
+        assert_eq!(done.summary, "result: success");
+        let unknown = parse_stdout(Harness::Rig, r#"{"type":"later","x":1}"#);
+        assert_eq!(unknown.kind, EventKind::Other, "an unknown type is kept");
+        assert_eq!(tool_input_text(r#"{"command":"ls -la"}"#), "ls -la");
     }
 
     #[test]

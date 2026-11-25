@@ -279,6 +279,61 @@ fn holder_verdict(id: &str, holder: Result<Option<i32>, String>) -> Result<(), S
     }
 }
 
+/// Refuse a rig launch that `kersh run` cannot carry: rig runs headless,
+/// from an agent file that names its model, with no other model over it.
+fn check_rig_launch(launch: &Launch) -> Result<(), SessionError> {
+    if launch.settings.mode != Mode::Headless {
+        return Err(SessionError::usage(
+            "rig runs headless only; drop --mode interactive",
+        ));
+    }
+    if launch.agent.is_none() {
+        return Err(SessionError::usage(
+            "a rig session runs an agent file; name the agent",
+        ));
+    }
+    if let Some(model) = &launch.settings.model {
+        return Err(SessionError::usage(format!(
+            "rig takes its model from the agent file's `model`, so `{model}` cannot apply; \
+             drop --model or the runtime's model"
+        )));
+    }
+    if launch.resume_conversation.is_some() {
+        return Err(SessionError::usage(
+            "a rig session has no conversation to resume",
+        ));
+    }
+    Ok(())
+}
+
+/// A rig run keeps no conversation, so it cannot be resumed or restarted.
+fn refuse_rig_resume(record: &Record) -> Result<(), SessionError> {
+    if record.harness != Harness::Rig {
+        return Ok(());
+    }
+    let agent = record
+        .agent
+        .as_ref()
+        .map_or("<agent>", |agent| agent.name.as_str());
+    Err(SessionError::usage(format!(
+        "a rig session keeps no conversation to continue; `kersh start {agent}` runs the agent again"
+    )))
+}
+
+/// The rig part of a record's launch, for a rig record with its agent.
+fn rig_run<'a>(record: &'a Record, entry: &'a [String]) -> Option<harness::RigRun<'a>> {
+    if record.harness != Harness::Rig {
+        return None;
+    }
+    let agent = record.agent.as_ref()?;
+    Some(harness::RigRun {
+        entry,
+        agent: &agent.name,
+        agent_file: &agent.path,
+        profile: record.runtime.settings.profile.as_deref(),
+    })
+}
+
 /// Read a session's note, if its wrapper wrote one.
 fn read_note(paths: &Paths, id: &str) -> Option<Note> {
     std::fs::read_to_string(paths.note(id))
@@ -551,9 +606,7 @@ impl Host {
     async fn start(&self, launch: Launch) -> Result<Record, SessionError> {
         let settings = &launch.settings;
         if settings.harness == Harness::Rig {
-            return Err(SessionError::usage(
-                "a rig agent does not run in a session yet; `kersh run` runs it in the foreground",
-            ));
+            check_rig_launch(&launch)?;
         }
         let prompt = launch.prompt.clone().filter(|text| !text.trim().is_empty());
         if settings.mode == Mode::Headless && prompt.is_none() {
@@ -596,8 +649,10 @@ impl Host {
             )
             .map_err(SessionError::failed)?;
         }
-        let build =
-            harness::resolve(settings.harness, &self.login_env).map_err(SessionError::failed)?;
+        let build = match settings.harness {
+            Harness::Rig => harness::rig_build(&self.entry),
+            other => harness::resolve(other, &self.login_env).map_err(SessionError::failed)?,
+        };
         let mux = self.mux().await?;
 
         let _guard = self.writer.lock().await;
@@ -755,6 +810,7 @@ impl Host {
             } else {
                 None
             },
+            rig: rig_run(record, &self.entry),
         };
         let file = LaunchFile {
             id: record.id.clone(),
@@ -856,6 +912,7 @@ impl Host {
 
     async fn restart_on(&self, mux: &impl Sessions, id: &str) -> Result<Record, SessionError> {
         let record = self.load(id)?;
+        refuse_rig_resume(&record)?;
         if record.mode == Mode::Headless {
             return Err(SessionError::usage(format!(
                 "a headless session continues only with a new prompt: kersh resume {id} --prompt-file -"
@@ -876,6 +933,7 @@ impl Host {
         prompt: Option<String>,
     ) -> Result<Record, SessionError> {
         let record = self.load(id)?;
+        refuse_rig_resume(&record)?;
         let prompt = prompt.filter(|text| !text.trim().is_empty());
         if record.mode == Mode::Headless && prompt.is_none() {
             return Err(SessionError::usage(

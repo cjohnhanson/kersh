@@ -122,7 +122,9 @@ pub fn check_profile(
             }
         ));
     }
-    let registered = registered_for_user(harness, env)
+    // rig calls `gaff hook` itself, so it needs no registration.
+    let registered = harness == Harness::Rig
+        || registered_for_user(harness, env)
         || project_hook_files(harness, cwd)
             .iter()
             .any(|path| names_gaff(path));

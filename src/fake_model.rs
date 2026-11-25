@@ -3,7 +3,7 @@
 //! This module exists behind the `fake-model` feature, off by default, so
 //! the shipped binary carries no fake provider. A test build turns it on,
 //! and `model: fake/scripted` selects it. The script is a JSON array in
-//! `KERSH_FAKE_SCRIPT`, one entry per model turn. It lets a missouri test
+//! `FAKE_MODEL_SCRIPT`, one entry per model turn. It lets a missouri test
 //! drive a whole governed run with no network: the fake model emits a
 //! scripted tool call, the real gaff hook runs, and the run ends on a
 //! scripted text turn.
@@ -41,6 +41,9 @@ enum Turn {
     /// prove what a tool returned: the file content when a guard allowed
     /// the read, or the refusal reason when a guard skipped it.
     EchoToolResult,
+    /// Emit the system prompt back as the answer, so a test can prove
+    /// which system prompt reached the model.
+    EchoSystem,
 }
 
 /// A model that plays a fixed script. Cloneable, as the trait requires;
@@ -51,14 +54,14 @@ pub struct FakeModel {
 }
 
 impl FakeModel {
-    /// Build a fake model from the JSON script in `KERSH_FAKE_SCRIPT`.
+    /// Build a fake model from the JSON script in `FAKE_MODEL_SCRIPT`.
     ///
     /// # Errors
     /// Returns the reason when the variable is unset or is not a JSON array
     /// of turns.
     pub fn from_env() -> Result<Self, String> {
-        let raw = std::env::var("KERSH_FAKE_SCRIPT")
-            .map_err(|_| "the fake model needs a script in KERSH_FAKE_SCRIPT".to_owned())?;
+        let raw = std::env::var("FAKE_MODEL_SCRIPT")
+            .map_err(|_| "the fake model needs a script in FAKE_MODEL_SCRIPT".to_owned())?;
         Self::from_json(&raw)
     }
 
@@ -68,12 +71,22 @@ impl FakeModel {
     /// Returns the reason when the text is not a JSON array of turns.
     fn from_json(raw: &str) -> Result<Self, String> {
         let script: Vec<Turn> = serde_json::from_str(raw)
-            .map_err(|error| format!("KERSH_FAKE_SCRIPT is not a valid script: {error}"))?;
+            .map_err(|error| format!("FAKE_MODEL_SCRIPT is not a valid script: {error}"))?;
         Ok(Self { script })
     }
 
     /// The turn to play, chosen by how many assistant turns already ran.
+    #[cfg(test)]
     fn turn_for(&self, history: &OneOrMany<Message>) -> AssistantContent {
+        self.turn_with_system(history, None)
+    }
+
+    /// The turn to play, with the request's preamble for `echo_system`.
+    fn turn_with_system(
+        &self,
+        history: &OneOrMany<Message>,
+        preamble: Option<&str>,
+    ) -> AssistantContent {
         let index = history
             .iter()
             .filter(|message| matches!(message, Message::Assistant { .. }))
@@ -85,6 +98,7 @@ impl FakeModel {
             Some(Turn::Text { text }) => AssistantContent::text(text.clone()),
             Some(Turn::EchoPrompt) => AssistantContent::text(last_user_text(history)),
             Some(Turn::EchoToolResult) => AssistantContent::text(last_tool_result_text(history)),
+            Some(Turn::EchoSystem) => AssistantContent::text(system_text(history, preamble)),
             // A run past the script ends, rather than looping forever.
             None => AssistantContent::text("fake: the script is spent".to_owned()),
         }
@@ -137,6 +151,18 @@ fn last_tool_result_text(history: &OneOrMany<Message>) -> String {
     found
 }
 
+/// The system prompt: the request's preamble, or else the system messages
+/// in the history, joined. rig carries it in either place.
+fn system_text(history: &OneOrMany<Message>, preamble: Option<&str>) -> String {
+    let mut parts: Vec<String> = preamble.map(str::to_owned).into_iter().collect();
+    for message in history.iter() {
+        if let Message::System { content } = message {
+            parts.push(content.clone());
+        }
+    }
+    parts.join("\n")
+}
+
 /// The fake's raw response. It carries nothing; the choice holds the turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FakeRaw;
@@ -164,7 +190,9 @@ impl CompletionModel for FakeModel {
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
         Ok(CompletionResponse {
-            choice: OneOrMany::one(self.turn_for(&request.chat_history)),
+            choice: OneOrMany::one(
+                self.turn_with_system(&request.chat_history, request.preamble.as_deref()),
+            ),
             usage: Usage::new(),
             raw_response: FakeRaw,
             message_id: None,
