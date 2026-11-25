@@ -17,9 +17,13 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 
 [features]
+default = ["tui"]
 # A scripted fake model provider, for hermetic end-to-end tests. Off by
 # default, so the shipped binary carries no fake provider.
 fake-model = []
+# The terminal UI, `kersh tui`. Off with --no-default-features, for a
+# build that needs only the commands, the MCP server, and the host.
+tui = ["dep:ratatui", "dep:mdstore"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -53,6 +57,29 @@ rmux-sdk = { version = "=0.10.0", default-features = false }
 rmux-client = { version = "=0.10.0", default-features = false }
 rmux-proto = { version = "=0.10.0", default-features = false }
 rmux-server = { version = "=0.10.0", default-features = false }
+# `kersh serve`: MCP on stdio only. The streamable HTTP transport is off,
+# so the server opens no listener.
+rmcp = { version = "3", default-features = false, features = ["server", "transport-io"] }
+# REST on the host's Unix socket, `host.sock`, with its OpenAPI document
+# generated from the same types the handlers return. axum's `tokio`
+# feature serves a `UnixListener`; nothing binds TCP.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+utoipa = "6"
+# The record stream of `GET /v1/changes`.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# kersh::Client's side of host.sock. Already in the tree through rig;
+# `blocking` keeps the calls synchronous, and `unix_socket` routes every
+# request to the socket file, so no request reaches the network.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
+# The terminal UI. ratatui re-exports the crossterm it was built
+# against. mdstore-core's `tui` kit is the family's keymap file, Emacs
+# preset, and Editor.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
+mdstore = { version = "0.6", package = "mdstore-core", default-features = false, features = ["tui"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Snapshots of the rendered terminal UI, one per screen and state.
+insta = "1.49"
+# Checks that the served OpenAPI document parses as OpenAPI 3.1.
+oas3 = "0.20"

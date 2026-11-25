@@ -1,0 +1,6 @@
+Browse and drive sessions in a terminal UI
+
+Usage: kersh tui
+
+Options:
+  -h, --help  Print help

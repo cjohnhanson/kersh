@@ -1,8 +1,8 @@
 //! The host: the single writer of session records, one per user.
 //!
 //! `kersh host` takes `host.lock`, captures the login environment, starts
-//! the session server when none answers, and serves the client protocol
-//! on `host.sock`. Every write (start, stop, resume, restart, rm, and the
+//! the session server when none answers, and serves REST on `host.sock`
+//! ([`rest`], the protocol of [`crate::proto`]). Every write (start, stop, resume, restart, rm, and the
 //! folding of each wrapper's exit note) happens under one lock, so two
 //! starts cannot both take a group's last place.
 //!
@@ -13,6 +13,7 @@
 //! server that dies or a session that vanishes is restored at once, not
 //! only at the next host start (see [`restoring`]).
 
+pub mod rest;
 mod restoring;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,14 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex, broadcast};
 
 use crate::harness::{self, Conversation as LaunchConversation, LaunchSpec};
 use crate::mux::Rmux;
 use crate::paths::Paths;
-use crate::proto::{self, Launch, Op, Response};
+use crate::proto::{self, Launch};
 use crate::runtime::Config;
 use crate::session::{
     Conversation, ConversationSource, EnvironmentInfo, Harness, Mode, RECORD_SCHEMA, Record,
@@ -202,25 +201,9 @@ async fn serve(host: Arc<Host>) -> Result<(), String> {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     });
-    loop {
-        let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
-        let host = Arc::clone(&host);
-        tokio::spawn(async move {
-            if let Err(error) = host.connection(stream).await {
-                eprintln!("kersh host: a connection failed: {error}");
-            }
-        });
-    }
-}
-
-async fn send_line(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    response: &Response,
-) -> std::io::Result<()> {
-    let mut line = serde_json::to_vec(response).map_err(std::io::Error::other)?;
-    line.push(b'\n');
-    writer.write_all(&line).await?;
-    writer.flush().await
+    axum::serve(listener, rest::router(host))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Apply a wrapper's note to its record: the pids it reported, then how
@@ -341,88 +324,7 @@ fn read_note(paths: &Paths, id: &str) -> Option<Note> {
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn to_value(value: &impl Serialize) -> Result<Value, SessionError> {
-    serde_json::to_value(value).map_err(|error| SessionError::failed(error.to_string()))
-}
-
 impl Host {
-    async fn connection(&self, stream: tokio::net::UnixStream) -> std::io::Result<()> {
-        let (read, mut write) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(read).lines();
-        while let Some(line) = lines.next_line().await? {
-            let request = match proto::parse_request(&line) {
-                Ok(request) => request,
-                Err(error) => {
-                    send_line(&mut write, &Response::err(error)).await?;
-                    continue;
-                }
-            };
-            if request.op == Op::Follow {
-                return self.follow(&mut write).await;
-            }
-            let response = match self.handle(request.op).await {
-                Ok(value) => Response::ok(value),
-                Err(error) => Response::err(error),
-            };
-            send_line(&mut write, &response).await?;
-        }
-        Ok(())
-    }
-
-    async fn follow(&self, write: &mut tokio::net::unix::OwnedWriteHalf) -> std::io::Result<()> {
-        let mut changes = self.changes.subscribe();
-        let send_all = async |write: &mut tokio::net::unix::OwnedWriteHalf| {
-            let records = crate::session::read_records(&self.paths.sessions()).unwrap_or_default();
-            for record in records {
-                let value = serde_json::to_value(&record).unwrap_or(Value::Null);
-                send_line(write, &Response::ok(value)).await?;
-            }
-            Ok::<(), std::io::Error>(())
-        };
-        send_all(write).await?;
-        loop {
-            match changes.recv().await {
-                Ok(record) => {
-                    let value = serde_json::to_value(&record).unwrap_or(Value::Null);
-                    send_line(write, &Response::ok(value)).await?;
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => send_all(write).await?,
-                Err(broadcast::error::RecvError::Closed) => return Ok(()),
-            }
-        }
-    }
-
-    async fn handle(&self, op: Op) -> Result<Value, SessionError> {
-        match op {
-            Op::Ping => Ok(Value::String(proto::VERSION.to_owned())),
-            Op::Follow => Err(SessionError::usage("follow is a stream")),
-            Op::Start(launch) => to_value(&self.start(*launch).await?),
-            Op::Stop { id } => to_value(&self.stop(&id).await?),
-            Op::Resume { id, prompt } => to_value(&self.resume(&id, prompt).await?),
-            Op::Restart { id } => to_value(&self.restart(&id).await?),
-            Op::Send { id, text } => {
-                self.send(&id, &text).await?;
-                Ok(Value::Null)
-            }
-            Op::Rm { id } => {
-                self.rm(&id).await?;
-                Ok(Value::Null)
-            }
-            Op::HarnessList => to_value(&harness::list(&self.login_env)),
-            Op::HeldReturn { id } => {
-                self.held_return(&id).await?;
-                Ok(Value::Null)
-            }
-            Op::Capture { id } => {
-                let record = self.load(&id)?;
-                let mux = self.mux().await?;
-                self.capture_one(&mux, &record).await;
-                Ok(Value::Null)
-            }
-            Op::RestartMux => to_value(&self.restart_mux().await?),
-        }
-    }
-
     /// The records a background path (restore, the watcher, captures,
     /// the prune) acts on. A record that does not read is skipped and
     /// logged once while it stays unreadable; the others still go on.

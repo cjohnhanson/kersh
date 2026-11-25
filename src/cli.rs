@@ -40,6 +40,19 @@ Sessions (rig, Claude Code, and Codex, hosted in a terminal session):
   kersh stop $KERSH_SESSION  (an agent ends its own session when its task is done)
 ";
 
+/// The primer's last lines: the front ends this build has.
+#[cfg(feature = "tui")]
+const FRONT_ENDS: &str = "\
+Front ends over the same calls: kersh serve (MCP on stdio), kersh tui, and REST
+on the host's socket, host.sock (GET /openapi.json describes it).
+";
+
+#[cfg(not(feature = "tui"))]
+const FRONT_ENDS: &str = "\
+Front ends over the same calls: kersh serve (MCP on stdio), and REST on the
+host's socket, host.sock (GET /openapi.json describes it).
+";
+
 const DOCS: &str = include_str!("../docs/kersh.md");
 
 /// The program name a multi-call binary passes as the first word.
@@ -210,7 +223,7 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Write and list runtimes in runtimes.yml.
+    /// Write, list, and show runtimes in runtimes.yml.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
@@ -229,6 +242,11 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
     },
+    /// Serve the session and agent commands over MCP on stdio.
+    Serve,
+    /// Browse and drive sessions in a terminal UI.
+    #[cfg(feature = "tui")]
+    Tui,
     /// Run the session host in the foreground.
     Host {
         #[arg(long, value_name = "DIR", hide = true)]
@@ -388,6 +406,13 @@ enum RuntimeCommand {
         #[command(flatten)]
         json: JsonArg,
     },
+    /// Print one runtime's fields.
+    Show {
+        /// The runtime's name.
+        name: String,
+        #[command(flatten)]
+        json: JsonArg,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -470,7 +495,7 @@ fn dispatch(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Prime => {
-            print!("{PRIME}");
+            print!("{PRIME}{FRONT_ENDS}");
             ExitCode::SUCCESS
         }
         command => command_into(command).map_or(ExitCode::FAILURE, crate::cli_sessions::dispatch),
@@ -569,7 +594,14 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
         Command::Runtime { command } => match command {
             RuntimeCommand::Add { name, file } => S::RuntimeAdd { name, file },
             RuntimeCommand::List { json } => S::RuntimeList { json: json.json },
+            RuntimeCommand::Show { name, json } => S::RuntimeShow {
+                name,
+                json: json.json,
+            },
         },
+        Command::Serve => S::Serve,
+        #[cfg(feature = "tui")]
+        Command::Tui => S::Tui,
         Command::Setup { harness, json } => S::Setup {
             harness,
             json: json.json,
@@ -1224,5 +1256,12 @@ mod tests {
     fn docs_and_prime_succeed() {
         assert_eq!(main(args(&["docs"])), ExitCode::SUCCESS);
         assert_eq!(main(args(&["prime"])), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn the_primer_names_the_tui_only_in_a_build_with_it() {
+        let text = format!("{PRIME}{FRONT_ENDS}");
+        assert_eq!(text.contains("kersh tui"), cfg!(feature = "tui"), "{text}");
+        assert!(text.contains("kersh serve"), "{text}");
     }
 }

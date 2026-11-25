@@ -35,6 +35,7 @@ pub mod paths;
 pub mod proto;
 pub mod restore;
 pub mod runtime;
+pub mod serve;
 pub mod service;
 pub mod session;
 pub mod sessions;
@@ -42,6 +43,8 @@ pub mod setup;
 pub mod skill;
 pub mod store;
 pub mod tools;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod util;
 pub mod wrapper;
 

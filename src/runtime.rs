@@ -18,7 +18,7 @@ use crate::paths::Paths;
 use crate::session::{Harness, Mode, PaneSize, Settings, StartRequest};
 
 /// One runtime in `runtimes.yml`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Runtime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +47,7 @@ pub struct Runtime {
 }
 
 /// A runtime with its name, as `kersh runtime list --json` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RuntimeEntry {
     pub name: String,
     #[serde(flatten)]

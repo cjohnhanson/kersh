@@ -11,12 +11,25 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The subcommands, in the order the top-level help lists them.
+/// The subcommands, in the order the top-level help lists them. `tui`
+/// exists only in a build with the `tui` feature.
+#[rustfmt::skip]
 const COMMANDS: &[&str] = &[
     "init", "list", "show", "check", "render", "run", "docs", "prime", "ps", "start", "attach",
     "stop", "resume", "restart", "send", "events", "screen", "rm", "harness", "agent", "runtime",
-    "setup", "memories", "host",
+    "setup", "memories", "serve",
+    #[cfg(feature = "tui")]
+    "tui",
+    "host",
 ];
+
+/// The top-level help's snapshot: a build without the TUI lists one
+/// command less.
+const TOP: &str = if cfg!(feature = "tui") {
+    "kersh"
+} else {
+    "kersh-no-tui"
+};
 
 fn snapshot_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -66,7 +79,7 @@ fn check(name: &str, actual: &str) -> Option<String> {
 #[test]
 fn help_matches_the_snapshots() {
     let mut failures = Vec::new();
-    failures.extend(check("kersh", &help(&[])));
+    failures.extend(check(TOP, &help(&[])));
     for command in COMMANDS {
         failures.extend(check(command, &help(&[command])));
     }

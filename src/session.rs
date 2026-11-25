@@ -9,12 +9,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// The record schema this build writes and reads.
 pub const RECORD_SCHEMA: u32 = 1;
 
 /// Which program a session runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
     /// kersh's built-in harness.
@@ -76,7 +77,7 @@ impl std::str::FromStr for Harness {
 }
 
 /// Whether kersh reads structured events (headless) or hosts a TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     Headless,
@@ -114,7 +115,7 @@ impl std::str::FromStr for Mode {
 }
 
 /// A session's lifecycle state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     /// The harness runs, or its wrapper left it for restore after a signal.
@@ -163,37 +164,41 @@ impl std::str::FromStr for State {
 }
 
 /// Which build of the harness a session runs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Build {
     /// How the build was found: `path`, the login `PATH`.
     pub installer: String,
+    #[schema(value_type = String)]
     pub path: PathBuf,
     /// The first line `<program> --version` printed.
     pub version: String,
 }
 
 /// What the environment prepared.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentInfo {
     /// `local`.
     pub kind: String,
+    #[schema(value_type = String)]
     pub cwd: PathBuf,
     /// The session's temp dir, kept while the record exists.
+    #[schema(value_type = Option<String>)]
     pub tempdir: Option<PathBuf>,
 }
 
 /// The agent file a session started from, and the overrides given.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AgentRef {
     pub name: String,
     /// The agent file that loaded.
+    #[schema(value_type = String)]
     pub path: PathBuf,
     /// The `kersh start` flags that overrode the files.
     pub overrides: BTreeMap<String, String>,
 }
 
 /// The resolved settings a session launched with.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Settings {
     pub harness: Harness,
     pub mode: Mode,
@@ -209,14 +214,14 @@ pub struct Settings {
 
 /// The runtime a session used: its name, when one was named, and the
 /// settings resolved at launch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeInfo {
     pub name: Option<String>,
     pub settings: Settings,
 }
 
 /// Where a conversation id came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationSource {
     /// kersh set it at launch (Claude Code's `--session-id`).
@@ -230,14 +235,14 @@ pub enum ConversationSource {
 }
 
 /// The harness's own conversation, for resume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Conversation {
     pub id: String,
     pub source: ConversationSource,
 }
 
 /// How a restore left a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreOutcome {
     /// The harness resumed its conversation.
@@ -247,7 +252,7 @@ pub enum RestoreOutcome {
 }
 
 /// One restore of a session, newest last on the record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Restore {
     pub at: String,
     /// What took the session down: `a reboot`, `the session server
@@ -263,7 +268,7 @@ pub struct Restore {
 }
 
 /// What RET runs in a held pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HeldRun {
     /// The first launch again: a new conversation with the first prompt.
@@ -273,7 +278,7 @@ pub enum HeldRun {
 }
 
 /// A pane size in character cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PaneSize {
     pub cols: u16,
     pub rows: u16,
@@ -289,7 +294,7 @@ impl Default for PaneSize {
 }
 
 /// One session, as the host records it and `kersh ps --json` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Record {
     pub schema: u32,
     /// Also `KERSH_SESSION` in the pane.
@@ -303,11 +308,13 @@ pub struct Record {
     pub agent: Option<AgentRef>,
     pub runtime: RuntimeInfo,
     /// The composed body and skill, passed again on every resume.
+    #[schema(value_type = Option<String>)]
     pub system_prompt: Option<PathBuf>,
     pub conversation: Option<Conversation>,
     /// Persistent harness flags, checked against the harness's allow-list.
     pub agent_flags: Vec<String>,
     /// The first prompt; never replayed without a person's say.
+    #[schema(value_type = Option<String>)]
     pub first_prompt: Option<PathBuf>,
     /// Opaque to kersh: stored and echoed, never interpreted.
     pub labels: BTreeMap<String, String>,
@@ -345,7 +352,10 @@ pub struct Record {
 
 /// What `kersh start` and [`crate::Client::start`] take. Everything but
 /// the harness is optional; an agent file and runtimes fill the rest.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Every field may be left out of its JSON; a field it does not name is
+/// refused, so a misspelled limit cannot be dropped in silence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct StartRequest {
     /// An agent file name. Without one, `harness` is required.
     pub agent: Option<String>,
@@ -358,8 +368,12 @@ pub struct StartRequest {
     pub skill: Option<String>,
     pub profile: Option<String>,
     /// Added to the agent's body for this session.
+    #[schema(value_type = Option<String>)]
     pub instructions_file: Option<PathBuf>,
-    /// The working directory; the caller's when absent.
+    /// The working directory. `POST /v1/sessions` requires it, as an
+    /// absolute path; `kersh start`, `kersh serve`, and `kersh::Client`
+    /// use the caller's directory when it is absent.
+    #[schema(value_type = Option<String>)]
     pub cwd: Option<PathBuf>,
     pub tempdir: bool,
     pub labels: BTreeMap<String, String>,
@@ -377,7 +391,7 @@ pub struct StartRequest {
 }
 
 /// A session's screen, as `kersh screen --json` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Screen {
     pub id: String,
     pub cols: u16,
@@ -386,11 +400,12 @@ pub struct Screen {
 }
 
 /// One harness build, as `kersh harness list --json` prints it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HarnessBuild {
     pub harness: Harness,
     /// `path`.
     pub installer: String,
+    #[schema(value_type = Option<String>)]
     pub path: Option<PathBuf>,
     pub version: Option<String>,
     /// Why no build was found, when none was.
@@ -398,7 +413,7 @@ pub struct HarnessBuild {
 }
 
 /// Why a session call failed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum SessionError {
     /// A start or resume met its group's limit. Exit 3.

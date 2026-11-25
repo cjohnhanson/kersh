@@ -1,23 +1,26 @@
 //! The session calls on [`Client`]: one per session command, with the
 //! same data the command prints as JSON.
 //!
-//! Writes go to the host over `host.sock`; a client that needs a write
-//! and finds no host starts one, unless `auto_start: false`. Reads (`ps`,
-//! `events`, `screen`) need no host: they read the records and events
-//! files and the session server directly. The calls block; an async
-//! caller runs them on a blocking thread.
+//! Writes go to the host over `host.sock`, in the protocol of
+//! [`crate::proto`]; a client that needs a write and finds no host starts
+//! one, unless `auto_start: false`. Reads (`ps`, `events`, `screen`) need
+//! no host: they read the records and events files and the session server
+//! directly. The calls block; an async caller runs them on a blocking
+//! thread.
 
-use std::io::{BufRead as _, Write as _};
+use std::io::BufRead as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use reqwest::Method;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::Client;
 use crate::events::Event;
 use crate::paths::Paths;
-use crate::proto::{self, Launch, Op, Request};
+use crate::proto::{self, Launch, ResumeBody, SendBody};
 use crate::runtime::{Config, RuntimeEntry};
 use crate::session::{
     AgentRef, HarnessBuild, Mode, Record, Screen, SessionError, StartRequest, State,
@@ -28,7 +31,7 @@ use crate::setup::SetupReport;
 /// every record first, then each change.
 #[derive(Debug)]
 pub struct RecordStream {
-    reader: std::io::BufReader<UnixStream>,
+    reader: std::io::BufReader<reqwest::blocking::Response>,
 }
 
 impl Iterator for RecordStream {
@@ -36,14 +39,65 @@ impl Iterator for RecordStream {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None,
-            Ok(_) => Some(proto::parse_response(&line).and_then(|value| {
-                serde_json::from_value(value)
-                    .map_err(|error| SessionError::failed(format!("a bad record: {error}")))
-            })),
-            Err(error) => Some(Err(SessionError::failed(error.to_string()))),
+        loop {
+            line.clear();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) if line.trim().is_empty() => {}
+                Ok(_) => {
+                    return Some(
+                        serde_json::from_str(&line)
+                            .map_err(|error| failed(format!("a bad record: {error}"))),
+                    );
+                }
+                Err(error) => return Some(Err(failed(error))),
+            }
         }
+    }
+}
+
+/// The error a response carries, or the response.
+fn checked(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, SessionError> {
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    proto::check_schema(
+        "the host's response",
+        Some(header(proto::SCHEMA_HEADER).as_deref().unwrap_or("0")),
+        header(proto::VERSION_HEADER).as_deref(),
+    )?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let text = response.text().map_err(failed)?;
+    Err(serde_json::from_str::<SessionError>(&text)
+        .unwrap_or_else(|_| failed(format!("the host answered {status}: {text}"))))
+}
+
+/// A response's JSON body; null for an empty one.
+fn json_of(response: reqwest::blocking::Response) -> Result<Value, SessionError> {
+    let bytes = response.bytes().map_err(failed)?;
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| failed(format!("the host sent a bad result: {error}")))
+}
+
+/// A session id as one path segment. Ids are short and safe; anything
+/// else is refused before it reaches a URL.
+fn segment(id: &str) -> Result<&str, SessionError> {
+    if crate::runtime::safe_name(id) {
+        Ok(id)
+    } else {
+        Err(SessionError::NotFound { id: id.to_owned() })
     }
 }
 
@@ -70,9 +124,38 @@ impl Client {
         &self.paths
     }
 
+    /// Refuse a running host of another protocol schema before anything
+    /// is sent to it. A schema 1 host reads JSON lines and cannot answer
+    /// HTTP, so its `host.lock` is the only place its schema shows.
+    fn same_schema_host(&self) -> Result<(), SessionError> {
+        let Some(lock) = crate::host::read_lock(&self.paths) else {
+            return Ok(());
+        };
+        if lock.schema == proto::PROTOCOL_SCHEMA {
+            return Ok(());
+        }
+        let auto_start = Config::load(&self.paths).map_or(true, |config| config.auto_start());
+        let then = if auto_start {
+            "the next kersh command starts a host of this build"
+        } else {
+            "`kersh host` starts a host of this build"
+        };
+        Err(SessionError::failed(format!(
+            "the running host is kersh {} (pid {}) and speaks protocol schema {}, but this \
+             kersh {} speaks schema {}; stop the old host with `kill {}`, and {then}",
+            lock.version,
+            lock.pid,
+            lock.schema,
+            proto::VERSION,
+            proto::PROTOCOL_SCHEMA,
+            lock.pid
+        )))
+    }
+
     fn connect_host(&self, start: bool) -> Result<UnixStream, SessionError> {
         let socket = self.paths.host_sock();
         if let Ok(stream) = UnixStream::connect(&socket) {
+            self.same_schema_host()?;
             return Ok(stream);
         }
         if !start {
@@ -128,18 +211,45 @@ impl Client {
         }
     }
 
-    fn call(&self, op: Op) -> Result<Value, SessionError> {
-        let mut stream = self.connect_host(true)?;
-        let mut line = serde_json::to_vec(&Request::new(op)).map_err(failed)?;
-        line.push(b'\n');
-        stream.write_all(&line).map_err(failed)?;
-        let mut reader = std::io::BufReader::new(stream);
-        let mut response = String::new();
-        reader.read_line(&mut response).map_err(failed)?;
-        if response.is_empty() {
-            return Err(SessionError::failed("the host closed the connection"));
+    /// Send one request to the host, starting the host when none runs.
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<reqwest::blocking::Response, SessionError> {
+        drop(self.connect_host(true)?);
+        let http = reqwest::blocking::Client::builder()
+            .unix_socket(self.paths.host_sock())
+            .timeout(None)
+            .build()
+            .map_err(failed)?;
+        let mut request = http
+            .request(method, format!("http://{}{path}", proto::AUTHORITY))
+            .header(proto::SCHEMA_HEADER, proto::PROTOCOL_SCHEMA.to_string())
+            .header(proto::VERSION_HEADER, proto::VERSION);
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
         }
-        proto::parse_response(&response)
+        checked(request.send().map_err(failed)?)
+    }
+
+    /// A call without a body; its JSON result, or null when it has none.
+    fn call(&self, method: Method, path: &str) -> Result<Value, SessionError> {
+        json_of(self.request(method, path, None)?)
+    }
+
+    /// A call with a JSON body.
+    fn call_with(
+        &self,
+        method: Method,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<Value, SessionError> {
+        let body = serde_json::to_vec(body).map_err(failed)?;
+        json_of(self.request(method, path, Some(body))?)
     }
 
     fn record(&self, id: &str) -> Result<Record, SessionError> {
@@ -180,17 +290,25 @@ impl Client {
 
     /// Every record, then each change, from the host. `kersh ps --follow`.
     pub fn ps_follow(&self) -> Result<RecordStream, SessionError> {
-        let mut stream = self.connect_host(true)?;
-        let mut line = serde_json::to_vec(&Request::new(Op::Follow)).map_err(failed)?;
-        line.push(b'\n');
-        stream.write_all(&line).map_err(failed)?;
+        let response = self.request(Method::GET, "/v1/changes", None)?;
         Ok(RecordStream {
-            reader: std::io::BufReader::new(stream),
+            reader: std::io::BufReader::new(response),
         })
     }
 
     /// Start a session and return its record. `kersh start`.
+    ///
+    /// The agent file, its skill, and the instructions file resolve here,
+    /// in the caller's directory and environment; the host gets the
+    /// resolved launch.
     pub fn start(&self, request: &StartRequest) -> Result<Record, SessionError> {
+        let launch = self.resolve_start(request)?;
+        from_value(self.call_with(Method::POST, "/v1/launches", &launch)?)
+    }
+
+    /// Resolve a start against this client's stores and runtimes, without
+    /// starting it.
+    pub fn resolve_start(&self, request: &StartRequest) -> Result<Launch, SessionError> {
         let agent = request
             .agent
             .as_deref()
@@ -258,7 +376,7 @@ impl Client {
                 "a label needs a key: --label KEY=VALUE",
             ));
         }
-        let launch = Launch {
+        Ok(Launch {
             settings: resolved.settings,
             flags: resolved.flags,
             agent: agent.as_ref().map(|agent| AgentRef {
@@ -279,51 +397,54 @@ impl Client {
             prompt: request.prompt.clone(),
             resume_conversation: request.resume_conversation.clone(),
             size: request.size,
-        };
-        from_value(self.call(Op::Start(Box::new(launch)))?)
+        })
     }
 
     /// End a session and close its pane. `kersh stop`.
     pub fn stop(&self, id: &str) -> Result<Record, SessionError> {
-        from_value(self.call(Op::Stop { id: id.to_owned() })?)
+        let path = format!("/v1/sessions/{}/stop", segment(id)?);
+        from_value(self.call(Method::POST, &path)?)
     }
 
     /// Continue a held or ended session's conversation in a new pane;
     /// a headless session needs a prompt. `kersh resume`.
     pub fn resume(&self, id: &str, prompt: Option<&str>) -> Result<Record, SessionError> {
-        from_value(self.call(Op::Resume {
-            id: id.to_owned(),
+        let path = format!("/v1/sessions/{}/resume", segment(id)?);
+        let body = ResumeBody {
             prompt: prompt.map(str::to_owned),
-        })?)
+        };
+        from_value(self.call_with(Method::POST, &path, &body)?)
     }
 
     /// Restart an interactive session on its conversation. `kersh
     /// restart`.
     pub fn restart(&self, id: &str) -> Result<Record, SessionError> {
-        from_value(self.call(Op::Restart { id: id.to_owned() })?)
+        let path = format!("/v1/sessions/{}/restart", segment(id)?);
+        from_value(self.call(Method::POST, &path)?)
     }
 
     /// Stop the session server by its recorded pid, start a new one, and
     /// restore every session from its record and last capture. The way
     /// past a server of another rmux wire version. `kersh restart --mux`.
     pub fn restart_mux(&self) -> Result<Vec<Record>, SessionError> {
-        from_value(self.call(Op::RestartMux)?)
+        from_value(self.call(Method::POST, "/v1/mux/restart")?)
     }
 
     /// RET in a held pane, from the pane's wrapper: the host runs the
     /// held command, gated like a resume.
     pub(crate) fn held_return(&self, id: &str) -> Result<(), SessionError> {
-        self.call(Op::HeldReturn { id: id.to_owned() }).map(|_| ())
+        let path = format!("/v1/sessions/{}/held-return", segment(id)?);
+        self.call(Method::POST, &path).map(|_| ())
     }
 
     /// Type `text` into a running interactive session, then Enter.
     /// `kersh send`.
     pub fn send(&self, id: &str, text: &str) -> Result<(), SessionError> {
-        self.call(Op::Send {
-            id: id.to_owned(),
+        let path = format!("/v1/sessions/{}/send", segment(id)?);
+        let body = SendBody {
             text: text.to_owned(),
-        })
-        .map(|_| ())
+        };
+        self.call_with(Method::POST, &path, &body).map(|_| ())
     }
 
     /// A headless session's events after `since`, from its events file.
@@ -354,7 +475,8 @@ impl Client {
     /// Delete an ended session's record, events, and temp dir. `kersh
     /// rm`.
     pub fn rm(&self, id: &str) -> Result<(), SessionError> {
-        self.call(Op::Rm { id: id.to_owned() }).map(|_| ())
+        let path = format!("/v1/sessions/{}", segment(id)?);
+        self.call(Method::DELETE, &path).map(|_| ())
     }
 
     /// Hand this terminal to the session until `C-]`. `kersh attach`.
@@ -364,8 +486,10 @@ impl Client {
             crate::mux::attach(&self.paths, &record.rmux_session).map_err(SessionError::failed);
         // A detach is one of the times the screen is captured, for a
         // restore to print above the agent. Only a running host does it.
-        if self.connect_host(false).is_ok() {
-            let _ = self.call(Op::Capture { id: id.to_owned() });
+        if let Ok(id) = segment(id)
+            && self.connect_host(false).is_ok()
+        {
+            let _ = self.call(Method::POST, &format!("/v1/sessions/{id}/capture"));
         }
         result
     }
@@ -375,7 +499,7 @@ impl Client {
     /// harness list`.
     pub fn harness_list(&self) -> Result<Vec<HarnessBuild>, SessionError> {
         if self.connect_host(false).is_ok() {
-            return from_value(self.call(Op::HarnessList)?);
+            return from_value(self.call(Method::GET, "/v1/harnesses")?);
         }
         let env =
             crate::login_env::capture(&crate::service::entry()).map_err(SessionError::failed)?;
@@ -427,6 +551,18 @@ impl Client {
         crate::runtime::list(&self.paths).map_err(SessionError::failed)
     }
 
+    /// One runtime by name. `kersh runtime show`.
+    pub fn runtime_show(&self, name: &str) -> Result<RuntimeEntry, SessionError> {
+        self.runtime_list()?
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                SessionError::usage(format!(
+                    "no runtime `{name}` in runtimes.yml; `kersh runtime list` lists them"
+                ))
+            })
+    }
+
     /// Run gaff's registration for `harness` and check each piece of its
     /// wiring. `kersh setup`.
     pub fn setup(&self, harness: crate::session::Harness) -> Result<SetupReport, SessionError> {
@@ -440,5 +576,33 @@ impl Client {
         let config = Config::load(&self.paths).map_err(SessionError::failed)?;
         let root = root.map(Path::to_path_buf).or(config.memory.root);
         crate::memories::generate(root.as_deref()).map_err(SessionError::failed)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_id_that_is_not_one_safe_segment_is_refused() {
+        assert_eq!(segment("acme-1").unwrap(), "acme-1");
+        for id in ["", "a/b", "../mux/restart", "a?b", "a b", "a%2Fb"] {
+            assert!(
+                matches!(segment(id), Err(SessionError::NotFound { .. })),
+                "{id:?} passed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_runtime_points_to_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::discover(dir.path()).with_paths(Paths::new(
+            dir.path().join("state"),
+            dir.path().join("config"),
+        ));
+        let error = client.runtime_show("nosuch").unwrap_err().to_string();
+        assert!(error.contains("`kersh runtime list`"), "{error}");
     }
 }

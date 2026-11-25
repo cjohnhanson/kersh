@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::session::Harness;
 
 /// What an event is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     /// The harness started its session.
@@ -43,7 +43,7 @@ pub enum EventKind {
 }
 
 /// One event, as `kersh events` prints it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Event {
     /// The sequence number, from 1, unique within the session.
     pub seq: u64,
@@ -69,6 +69,7 @@ pub struct Event {
     pub conversation: Option<String>,
     /// The harness's line: its JSON, or the text of a line that is not
     /// JSON.
+    #[schema(value_type = Value)]
     pub raw: Value,
 }
 

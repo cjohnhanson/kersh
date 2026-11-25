@@ -1170,20 +1170,38 @@ fn sigterm_to_a_headless_wrapper_holds_the_session_and_stops_the_harness() {
     }
 }
 
-/// Send one request line to the host and parse its answer.
-fn ask_host(env: &Env, request: &Value) -> Result<Value, kersh::session::SessionError> {
-    use std::io::{BufRead as _, Write as _};
-    let mut stream =
-        std::os::unix::net::UnixStream::connect(env.state().join("host.sock")).unwrap();
-    stream.write_all(format!("{request}\n").as_bytes()).unwrap();
-    let mut line = String::new();
-    std::io::BufReader::new(stream)
-        .read_line(&mut line)
+/// Post one launch to the host's REST API with the schema header
+/// `schema`, and parse its answer: the record, or the error.
+fn post_launch(
+    env: &Env,
+    launch: &Value,
+    schema: u32,
+) -> Result<Value, kersh::session::SessionError> {
+    let response = reqwest::blocking::Client::builder()
+        .unix_socket(env.state().join("host.sock"))
+        .build()
+        .unwrap()
+        .post("http://kersh/v1/launches")
+        .header(kersh::proto::SCHEMA_HEADER, schema.to_string())
+        .header(kersh::proto::VERSION_HEADER, "9.9.9")
+        .json(launch)
+        .send()
         .unwrap();
-    kersh::proto::parse_response(&line)
+    let ok = response.status().is_success();
+    let body: Value = response.json().unwrap();
+    if ok {
+        Ok(body)
+    } else {
+        Err(serde_json::from_value(body).unwrap())
+    }
 }
 
-/// A start request as a client that skips the CLI would send it.
+/// Post one launch at this build's schema.
+fn ask_host(env: &Env, launch: &Value) -> Result<Value, kersh::session::SessionError> {
+    post_launch(env, launch, kersh::proto::PROTOCOL_SCHEMA)
+}
+
+/// A launch as a client that skips the CLI would send it.
 fn raw_start(
     env: &Env,
     flags: &[&str],
@@ -1192,9 +1210,6 @@ fn raw_start(
     settings_env: &Value,
 ) -> Value {
     serde_json::json!({
-        "schema": kersh::proto::PROTOCOL_SCHEMA,
-        "version": "test",
-        "op": "start",
         "settings": {
             "harness": "claude-code",
             "mode": "interactive",
@@ -1321,11 +1336,7 @@ fn the_host_refuses_a_bad_request_from_a_client_that_skips_the_cli() {
         matches!(&error, kersh::session::SessionError::Usage { message } if message.contains("needs --group")),
         "{error:?}"
     );
-    let error = ask_host(
-        &env,
-        &serde_json::json!({"schema": 99, "version": "9.9.9", "op": "ping"}),
-    )
-    .unwrap_err();
+    let error = post_launch(&env, &start(&[], None, None), 99).unwrap_err();
     assert!(
         matches!(
             &error,

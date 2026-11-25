@@ -23,9 +23,11 @@ Commands:
   rm        Delete an ended session's record, events, and temp dir
   harness   The harness builds kersh would run
   agent     Write agent files into the user-level store
-  runtime   Write and list runtimes in runtimes.yml
+  runtime   Write, list, and show runtimes in runtimes.yml
   setup     Run gaff's registration for a harness and check its wiring. Exits 1 when a piece is missing
   memories  Print the agent-memory block for a gaff section
+  serve     Serve the session and agent commands over MCP on stdio
+  tui       Browse and drive sessions in a terminal UI
   host      Run the session host in the foreground
   help      Print this message or the help of the given subcommand(s)
 
