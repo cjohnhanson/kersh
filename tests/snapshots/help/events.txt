@@ -1,0 +1,12 @@
+Print a headless session's events as JSON lines
+
+Usage: kersh events [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --since <N>  Only events after this sequence number [default: 0]
+      --follow     Keep printing new events until the session stops running
+      --text       Print each event's summary line instead of JSON
+  -h, --help       Print help

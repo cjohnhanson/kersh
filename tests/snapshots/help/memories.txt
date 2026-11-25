@@ -1,0 +1,7 @@
+Print the agent-memory block for a gaff section
+
+Usage: kersh memories [OPTIONS]
+
+Options:
+      --root <DIR>  The notes store; the configured memory.root by default
+  -h, --help        Print help

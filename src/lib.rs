@@ -14,6 +14,7 @@
 
 pub mod agent;
 pub mod cli;
+mod cli_sessions;
 pub mod client;
 pub mod compose;
 pub mod discover;
@@ -26,6 +27,7 @@ pub mod harness;
 pub mod hook;
 pub mod host;
 pub mod login_env;
+pub mod memories;
 pub mod model;
 pub mod mux;
 pub mod paths;
@@ -34,6 +36,7 @@ pub mod runtime;
 pub mod service;
 pub mod session;
 pub mod sessions;
+pub mod setup;
 pub mod skill;
 pub mod store;
 pub mod tools;

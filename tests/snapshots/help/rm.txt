@@ -1,0 +1,9 @@
+Delete an ended session's record, events, and temp dir
+
+Usage: kersh rm <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+  -h, --help  Print help

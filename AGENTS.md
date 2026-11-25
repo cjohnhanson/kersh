@@ -49,6 +49,12 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/client.rs` | `kersh::Client`, the library API; every method has a command with the same JSON |
 | `src/agent.rs`, `src/store.rs` | agent files and their roots |
 | `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs` | rig, the built-in harness, and its gaff governance |
+| `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol, each with a schema number |
+| `src/host.rs`, `src/wrapper.rs`, `src/mux.rs`, `src/service.rs` | the host (single writer), the pane wrapper and its exit cases, the rmux server and attach client, and how the host and server start |
+| `src/harness.rs`, `src/runtime.rs`, `src/login_env.rs`, `src/guard.rs`, `src/discover.rs` | launch argv and the flag allow-list per harness, runtimes and settings order, the login environment, profile checks, and Codex conversation discovery |
+| `src/client/session_calls.rs`, `src/cli_sessions.rs` | the session calls on `Client` and their commands |
+| `src/setup.rs`, `src/memories.rs` | `kersh setup` and `kersh memories` |
+| `tests/sessions.rs`, `tests/fixtures/` | sessions end to end: a real session server on a temp socket, fake `claude` and `codex` scripts, canned streams |
 | `tests/help.rs`, `tests/snapshots/help/` | `--help` snapshots for every command |
 | `tests/missouri/` | state-transition suites; `gaff-runner` holds gaff's hook-agent contract |
 | `tests/probes/` | probes of real harnesses; they need network and a signed-in harness, so no gate runs them |
@@ -60,6 +66,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 - **Every `Client` method has a command.** The command prints the same data as JSON lines with `--json`, so anything a linked program can do also works from a shell.
 - **rmux stays behind the `Sessions` interface, pinned `=0.10.0`.** An upgrade is its own change with the gate rerun.
 - **No credential code.** Credentials reach a harness only through `op run` and the harness's own login; kersh stores, mints, encrypts, and enforces none.
+- **Sessions start from the login environment.** The host captures it once; the server, every pane, and every harness start from it, never from the caller's environment.
 - **Tests use fixtures.** No test, probe, or capture reads a real card, note, queue, or transcript; probes read ids and event types only.
 
 ## External references

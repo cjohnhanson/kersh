@@ -1,0 +1,10 @@
+Type text into a running interactive session, then Enter
+
+Usage: kersh send [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --prompt-file <PATH|->  The text, from this file or standard input for `-` [default: -]
+  -h, --help                  Print help

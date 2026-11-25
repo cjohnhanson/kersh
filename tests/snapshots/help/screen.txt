@@ -1,0 +1,11 @@
+Print a session's screen as plain text
+
+Usage: kersh screen [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --follow  Print the screen again each time it changes
+      --json    Print JSON, one object per line
+  -h, --help    Print help

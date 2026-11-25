@@ -1,0 +1,12 @@
+List sessions. --follow streams each record change
+
+Usage: kersh ps [OPTIONS] [IDS]...
+
+Arguments:
+  [IDS]...  Only these sessions
+
+Options:
+      --state <STATE>  Only sessions in this state: running, held, ended, or lost
+      --follow         Print every record, then each change, until interrupted
+      --json           Print JSON, one object per line
+  -h, --help           Print help

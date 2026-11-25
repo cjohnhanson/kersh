@@ -1,0 +1,10 @@
+Restart an interactive session on its conversation
+
+Usage: kersh restart [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --json  Print JSON, one object per line
+  -h, --help  Print help

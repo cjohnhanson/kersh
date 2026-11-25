@@ -1,0 +1,26 @@
+Start a session. Prints its id; exits 3 at the group's limit
+
+Usage: kersh start [OPTIONS] [AGENT] [-- <HARNESS FLAGS>...]
+
+Arguments:
+  [AGENT]             The agent file to start. Without one, --harness or --runtime is required
+  [HARNESS FLAGS]...  Flags for the harness, after `--`, checked against its allow-list
+
+Options:
+      --runtime <NAME>            A runtime from runtimes.yml, over the agent's own
+      --harness <HARNESS>         claude-code or codex
+      --mode <MODE>               headless or interactive
+      --model <MODEL>             The harness's model
+      --skill <SKILL>             Replace the agent's almanac skill
+      --profile <PROFILE>         The gaff profile
+      --instructions-file <PATH>  Add this file's text to the agent's instructions
+      --cwd <DIR>                 The working directory; the current one by default
+      --tempdir                   Give the session its own temp dir, kept with its record
+      --label <KEY=VALUE>         A label kersh stores and echoes, never reads. Repeatable
+      --group <GROUP>             The session's group, for --max-running
+      --max-running <N>           Refuse the start, exit 3, when the group already has this many sessions running
+      --name <NAME>               A name for the session
+      --prompt-file <PATH|->      The first prompt, from this file or standard input for `-`. A headless start needs one
+      --resume-conversation <ID>  Resume this harness conversation instead of starting a new one
+      --json                      Print JSON, one object per line
+  -h, --help                      Print help

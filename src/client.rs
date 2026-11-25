@@ -1,21 +1,27 @@
 //! The library API over a kersh root.
 //!
-//! A linked program reads agents through [`Client`]; the CLI calls the
-//! same methods. Every method has a command that prints the same data as
-//! JSON with `--json`, one object per line for a list, so anything a
-//! linked program can do also works from a shell.
+//! A linked program reads agents and drives sessions through [`Client`];
+//! the CLI calls the same methods. Every method has a command that prints
+//! the same data as JSON with `--json`, one object per line for a list,
+//! so anything a linked program can do also works from a shell.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::agent::{Agent, LoadError};
+use crate::paths::Paths;
 use crate::store::Stores;
 
-/// Reads over the agent stores.
+mod session_calls;
+
+pub use session_calls::RecordStream;
+
+/// Reads over the agent stores, and the session calls.
 #[derive(Debug, Clone)]
 pub struct Client {
     stores: Stores,
+    paths: Paths,
 }
 
 /// One row of [`Client::list`]: an agent that loads, or a file that does
@@ -98,7 +104,10 @@ impl Client {
     /// A client over the given stores.
     #[must_use]
     pub fn new(stores: Stores) -> Self {
-        Self { stores }
+        Self {
+            stores,
+            paths: Paths::discover(),
+        }
     }
 
     /// A client over one explicit root, as `--root` gives.
