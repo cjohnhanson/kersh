@@ -442,7 +442,9 @@ mod tests {
             "a lock no process holds is left from a server that is gone"
         );
         let held = std::fs::File::open(paths.mux_lock()).unwrap();
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        // A process another test forks in this window can keep the shared
+        // lock `check_wire` just took until it execs, so wait for it.
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
         let error = check_wire(&paths).unwrap_err();
         assert!(error.contains("kersh 0.0.1"), "{error}");
         assert!(error.contains("`kersh restart --mux`"), "{error}");
