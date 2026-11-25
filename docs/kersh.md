@@ -179,7 +179,7 @@ kersh service install
 kersh service stop
 ```
 
-`config.yml` defaults: `service_manager` is macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`; `auto_start` is `true`. With auto-start enabled, `start`, `stop`, `resume`, `restart`, `rm`, `send` and `ps --follow` start a missing host through its installed unit. Without a unit, the client starts a one-shot launchd job, transient systemd unit or detached process, according to `service_manager`; the host survives terminal closure. With `none`, installation fails with exit `1`; select `launchd` or `systemd`.
+`config.yml` defaults: `service_manager` is macOS `launchd`, Linux `systemd` with a user manager, otherwise `none`; `auto_start` is `true`. With auto-start enabled, `start`, `stop`, `resume`, `restart`, `rm`, `send` and `ps --follow` start a missing host through its installed unit. If the unit fails to start, the client reports the failure and falls back to a one-shot host. Run `kersh service install` to reload the unit. If systemd has masked it, first run `systemctl --user unmask kersh-host.service`. Without a unit, it also uses a one-shot host: a launchd job, transient systemd unit or detached process, according to `service_manager`; the host survives terminal closure. With `service_manager: systemd`, both startup routes need a running user manager. If it is absent, the client gives one error and stops. Log in through a session that starts a user manager, or set `service_manager: none`. With `none`, installation fails with exit `1`; select `launchd` or `systemd`.
 
 ## Governance with gaff
 
