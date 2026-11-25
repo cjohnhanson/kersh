@@ -187,6 +187,79 @@ fn run_goes_ahead_when_runtimes_yml_is_invalid() {
     }
 }
 
+#[test]
+fn run_refuses_context_and_prompt_both_from_standard_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_agent(tmp.path(), "worker", "");
+    let output = run(
+        tmp.path(),
+        &["run", "worker", "--context-file", "-", "--prompt-file", "-"],
+        TOOL_THEN_TEXT,
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains("cannot both read standard input"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn run_of_an_agent_with_no_model_advises_a_model_or_another_harness() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("kersh.yml"), "").unwrap();
+    let dir = tmp.path().join("agents/bare");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("AGENT.md"),
+        "---\nname: bare\n---\nYou do one task.\n",
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["run", "bare", "go"], TOOL_THEN_TEXT);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let error = stderr(&output);
+    assert!(
+        error.contains("give it a `model` or another harness"),
+        "{error}"
+    );
+    assert!(!error.contains("kersh start"), "{error}");
+}
+
+#[test]
+fn run_output_jsonl_marks_a_gaff_refused_tool_call_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_agent(tmp.path(), "worker", "profile: worker\n");
+    let gaff = tmp.path().join("gaff");
+    support::write_exe(
+        &gaff,
+        "#!/bin/sh\n\
+         body=$(cat)\n\
+         case \"$body\" in\n\
+           *'\"gaff_event\":\"pre_tool_call\"'*) echo 'bash is refused' 1>&2; exit 2 ;;\n\
+         esac\n\
+         exit 0\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_kersh"))
+        .args(["run", "worker", "--output", "jsonl", "go"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", tmp.path())
+        .env("KERSH_GAFF", &gaff)
+        .env("FAKE_MODEL_SCRIPT", TOOL_THEN_TEXT)
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let events = lines(&output);
+    let result = events
+        .iter()
+        .find(|e| e["type"] == "tool_result")
+        .unwrap_or_else(|| panic!("no tool_result line: {events:?}"));
+    assert_eq!(result["tool"], "bash");
+    assert_eq!(result["status"], "refused", "{result}");
+}
+
 /// A kersh root in the working directory with a rig agent on the
 /// runtime `name`, whose environment carries `script`.
 fn rig_agent(env: &Env, name: &str, script: Option<&str>) {
@@ -371,4 +444,101 @@ fn a_profiled_rig_session_runs_under_its_gaff_profile() {
     let seen = std::fs::read_to_string(&seen).unwrap();
     assert!(!seen.is_empty());
     assert!(seen.lines().all(|line| line == "worker"), "{seen}");
+}
+
+#[test]
+fn a_rig_start_refuses_a_model_from_the_flag_or_the_runtime() {
+    let env = Env::new();
+    rig_agent(&env, "fixer", Some(TOOL_THEN_TEXT));
+    let output = env.kersh_in(
+        &["start", "fixer", "--model", "other", "--prompt-file", "-"],
+        "go",
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("drop --model"),
+        "{}",
+        stderr(&output)
+    );
+
+    let file = env.work().join("modelled.yml");
+    std::fs::write(&file, "model: other\n").unwrap();
+    let added = env.kersh(&["runtime", "add", "modelled", file.to_str().unwrap()]);
+    assert!(added.status.success(), "{}", stderr(&added));
+    let output = env.kersh_in(
+        &[
+            "start",
+            "fixer",
+            "--runtime",
+            "modelled",
+            "--prompt-file",
+            "-",
+        ],
+        "go",
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("`other`"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_rig_start_refuses_a_conversation_to_resume() {
+    let env = Env::new();
+    rig_agent(&env, "fixer", Some(TOOL_THEN_TEXT));
+    let output = env.kersh_in(
+        &[
+            "start",
+            "fixer",
+            "--resume-conversation",
+            "abc",
+            "--prompt-file",
+            "-",
+        ],
+        "go",
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no conversation to resume"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_rig_start_refuses_an_agent_with_no_model() {
+    let env = Env::new();
+    let dir = env.work().join("agents/bare");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(env.work().join("kersh.yml"), "").unwrap();
+    std::fs::write(
+        dir.join("AGENT.md"),
+        "---\nname: bare\n---\nYou do one task.\n",
+    )
+    .unwrap();
+    let output = env.kersh_in(&["start", "bare", "--prompt-file", "-"], "go");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("give it a `model` or another harness"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_rig_session_runs_with_its_composed_system_prompt() {
+    let env = Env::new();
+    rig_agent(&env, "teller", Some(r#"[{"kind":"echo_system"}]"#));
+    let file = env.work().join("extra.md");
+    std::fs::write(&file, "INSTRUCTIONS-MARK-5").unwrap();
+    let id = env.start(
+        &["teller", "--instructions-file", file.to_str().unwrap()],
+        "go",
+    );
+    env.wait(&id, "ended", |r| r["state"] == "ended");
+    let all = events(&env, &id);
+    let text = all.last().unwrap()["raw"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(text.contains("INSTRUCTIONS-MARK-5"), "{text}");
+    assert!(text.contains("You do one task."), "{text}");
 }

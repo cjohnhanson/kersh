@@ -893,7 +893,7 @@ fn run_inner(args: &RunArgs, stream: Option<&crate::jsonl::Stream>) -> Result<St
     let mut agent = load_run_agent(args)?;
     if agent.meta.model.is_empty() {
         return Err(format!(
-            "`{name}` names no model, so rig cannot run it; `kersh start {name}` runs it in a session"
+            "`{name}` names no model, so rig cannot run it; give it a `model` or another harness"
         ));
     }
     if let Some(profile) = &args.profile {

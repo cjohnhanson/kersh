@@ -41,6 +41,9 @@ enum Turn {
     /// prove what a tool returned: the file content when a guard allowed
     /// the read, or the refusal reason when a guard skipped it.
     EchoToolResult,
+    /// Emit the system prompt back as the answer, so a test can prove
+    /// which system prompt reached the model.
+    EchoSystem,
 }
 
 /// A model that plays a fixed script. Cloneable, as the trait requires;
@@ -73,7 +76,17 @@ impl FakeModel {
     }
 
     /// The turn to play, chosen by how many assistant turns already ran.
+    #[cfg(test)]
     fn turn_for(&self, history: &OneOrMany<Message>) -> AssistantContent {
+        self.turn_with_system(history, None)
+    }
+
+    /// The turn to play, with the request's preamble for `echo_system`.
+    fn turn_with_system(
+        &self,
+        history: &OneOrMany<Message>,
+        preamble: Option<&str>,
+    ) -> AssistantContent {
         let index = history
             .iter()
             .filter(|message| matches!(message, Message::Assistant { .. }))
@@ -85,6 +98,7 @@ impl FakeModel {
             Some(Turn::Text { text }) => AssistantContent::text(text.clone()),
             Some(Turn::EchoPrompt) => AssistantContent::text(last_user_text(history)),
             Some(Turn::EchoToolResult) => AssistantContent::text(last_tool_result_text(history)),
+            Some(Turn::EchoSystem) => AssistantContent::text(system_text(history, preamble)),
             // A run past the script ends, rather than looping forever.
             None => AssistantContent::text("fake: the script is spent".to_owned()),
         }
@@ -137,6 +151,18 @@ fn last_tool_result_text(history: &OneOrMany<Message>) -> String {
     found
 }
 
+/// The system prompt: the request's preamble, or else the system messages
+/// in the history, joined. rig carries it in either place.
+fn system_text(history: &OneOrMany<Message>, preamble: Option<&str>) -> String {
+    let mut parts: Vec<String> = preamble.map(str::to_owned).into_iter().collect();
+    for message in history.iter() {
+        if let Message::System { content } = message {
+            parts.push(content.clone());
+        }
+    }
+    parts.join("\n")
+}
+
 /// The fake's raw response. It carries nothing; the choice holds the turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FakeRaw;
@@ -164,7 +190,9 @@ impl CompletionModel for FakeModel {
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
         Ok(CompletionResponse {
-            choice: OneOrMany::one(self.turn_for(&request.chat_history)),
+            choice: OneOrMany::one(
+                self.turn_with_system(&request.chat_history, request.preamble.as_deref()),
+            ),
             usage: Usage::new(),
             raw_response: FakeRaw,
             message_id: None,
