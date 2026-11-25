@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -217,6 +217,103 @@ fn check_text_is_unchanged() {
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("kersh: "));
     std::fs::remove_dir_all(tmp.path().join("agents").join("broken")).unwrap();
     assert_eq!(stdout(&kersh(&["check", "--root", r])), "ok: 2 agent(s)\n");
+}
+
+#[test]
+fn a_root_without_kersh_yml_is_refused_in_every_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bare = tmp.path().join("bare");
+    std::fs::create_dir(&bare).unwrap();
+    let typo = tmp.path().join("typo");
+    for dir in [&bare, &typo] {
+        let d = dir.to_str().unwrap();
+        let want = format!("kersh: `{d}` is not a kersh root (no kersh.yml)\n");
+        for args in [
+            &["check", "--root", d][..],
+            &["check", "--json", "--root", d],
+            &["list", "--root", d],
+            &["list", "--json", "--root", d],
+            &["show", "reviewer", "--root", d],
+            &["show", "reviewer", "--json", "--root", d],
+            &["render", "reviewer", "--root", d, "go"],
+            &["render", "reviewer", "--json", "--root", d, "go"],
+            &["run", "reviewer", "--root", d, "go"],
+        ] {
+            let output = kersh(args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            assert!(output.stdout.is_empty(), "{args:?}: {}", stdout(&output));
+            assert_eq!(String::from_utf8_lossy(&output.stderr), want, "{args:?}");
+        }
+    }
+}
+
+/// Run a program and return its trimmed stdout.
+fn tool(program: &str, args: &[&str]) -> String {
+    let output = Command::new(program).args(args).output().unwrap();
+    assert!(output.status.success(), "{program} {args:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// The home directory the user database records for this user, read
+/// through the platform's own tool rather than `HOME`.
+fn user_database_home() -> PathBuf {
+    let user = tool("id", &["-un"]);
+    let home = if cfg!(target_os = "macos") {
+        let record = tool(
+            "dscl",
+            &[".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"],
+        );
+        record.split_once(':').unwrap().1.trim().to_owned()
+    } else {
+        let record = tool("getent", &["passwd", &user]);
+        record.split(':').nth(5).unwrap().to_owned()
+    };
+    PathBuf::from(home)
+}
+
+#[test]
+fn with_no_home_the_user_store_comes_from_the_user_database() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::write(root.join("kersh.yml"), "").unwrap();
+
+    // `env -i`: no HOME, no PATH, nothing inherited, as gaff runs a hook
+    // agent.
+    let output = Command::new("env")
+        .arg("-i")
+        .arg(env!("CARGO_BIN_EXE_kersh"))
+        .args(["check", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = lines(&stdout(&output));
+    let user_store = user_database_home().join(".config").join("kersh");
+    assert_eq!(
+        rows.last().unwrap()["roots"],
+        serde_json::json!([root, user_store]),
+        "the user store resolves under the user database's home"
+    );
+
+    // A set HOME wins over the user database.
+    let home = root.join("home");
+    let output = Command::new("env")
+        .arg("-i")
+        .arg(format!("HOME={}", home.display()))
+        .arg(env!("CARGO_BIN_EXE_kersh"))
+        .args(["check", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let rows = lines(&stdout(&output));
+    assert_eq!(
+        rows.last().unwrap()["roots"],
+        serde_json::json!([root, home.join(".config").join("kersh")])
+    );
 }
 
 #[test]

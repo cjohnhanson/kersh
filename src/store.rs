@@ -24,7 +24,9 @@ pub struct Stores {
 
 impl Stores {
     /// Discover the stores for `cwd`: the nearest `kersh.yml` up the tree,
-    /// then `~/.config/kersh`. Either may be absent.
+    /// then `~/.config/kersh` when a home directory resolves. The repo root
+    /// may be absent; the user store is searched even before its `agents`
+    /// directory exists, and a lookup there finds nothing.
     #[must_use]
     pub fn discover(cwd: &Path, home: Option<&Path>) -> Self {
         let mut dirs = Vec::new();
@@ -33,11 +35,17 @@ impl Stores {
         }
         if let Some(home) = home {
             let user = home.join(".config").join("kersh");
-            if user.join(AGENTS_DIR).is_dir() && !dirs.contains(&user) {
+            if !dirs.contains(&user) {
                 dirs.push(user);
             }
         }
         Self { dirs }
+    }
+
+    /// The directories a name resolves against, nearest first.
+    #[must_use]
+    pub fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
     }
 
     /// Build stores from an explicit root, for `--root`.

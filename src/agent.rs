@@ -26,8 +26,13 @@ pub struct Meta {
     /// One line for `kersh list`.
     #[serde(default)]
     pub description: String,
-    /// The model, as `<provider>/<model>`, e.g. `claude-code/haiku`.
+    /// rig's model, as `<provider>/<model>`, e.g. `claude-code/haiku`.
+    /// An agent that runs only on another harness may leave it out.
+    #[serde(default)]
     pub model: String,
+    /// The runtime used when the caller names none.
+    #[serde(default)]
+    pub runtime: Option<String>,
     /// An almanac skill whose body is appended to the system prompt.
     #[serde(default)]
     pub skill: Option<String>,
@@ -128,7 +133,7 @@ impl Agent {
                 dir: dir_name.to_owned(),
             });
         }
-        if !model_is_safe(&meta.model) {
+        if !meta.model.is_empty() && !model_is_safe(&meta.model) {
             return Err(LoadError::BadModel {
                 path: path.to_path_buf(),
                 model: meta.model,
@@ -151,6 +156,17 @@ impl Agent {
     pub fn model_id(&self) -> &str {
         self.meta.model.split_once('/').map_or("", |(_, m)| m)
     }
+}
+
+/// The `name` an agent file's frontmatter declares, if it has one.
+#[must_use]
+pub fn declared_name(text: &str) -> Option<String> {
+    let (front, _) = split_frontmatter(text)?;
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(front).ok()?;
+    value
+        .get("name")
+        .and_then(serde_yaml_ng::Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Split `---\n<front>\n---\n<body>` into the frontmatter and the body.
@@ -244,6 +260,13 @@ mod tests {
                 "{model}: {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_for_another_harness_may_name_no_model_and_a_runtime() {
+        let agent = parse("---\nname: fixer\nruntime: worker\n---\nFix it.\n", "fixer").unwrap();
+        assert_eq!(agent.meta.model, "");
+        assert_eq!(agent.meta.runtime.as_deref(), Some("worker"));
     }
 
     #[test]

@@ -1,0 +1,11 @@
+Continue a held or ended session's conversation in a new pane
+
+Usage: kersh resume [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --prompt-file <PATH|->  The prompt, from this file or standard input for `-`. A headless session needs one
+      --json                  Print JSON, one object per line
+  -h, --help                  Print help

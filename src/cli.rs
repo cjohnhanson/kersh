@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::client::{Client, ListEntry};
-use crate::store::Stores;
+use crate::session::{Harness, Mode, State};
 
 const PRIME: &str = "\
 # kersh
@@ -28,7 +28,16 @@ Commands:
   kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]
   kersh docs
   kersh --version
-Every command takes --root <dir>. --json prints one JSON object per line.
+Agent-file commands take --root <dir>. --json prints one JSON object per line.
+Sessions (Claude Code and Codex, hosted in a terminal session):
+  kersh start [agent] [--runtime R] [--harness H] [--mode M] [--prompt-file <path|->]
+  kersh ps [--follow] [--json]
+  kersh attach <id>          (C-] leaves it running)
+  kersh events <id> [--since N] [--follow]
+  kersh screen <id>
+  kersh send <id> --prompt-file <path|->
+  kersh stop|resume|restart|rm <id>
+  kersh stop $KERSH_SESSION  (an agent ends its own session when its task is done)
 ";
 
 const DOCS: &str = include_str!("../docs/kersh.md");
@@ -113,6 +122,250 @@ enum Command {
     Docs,
     /// Print a short primer for an agent's context.
     Prime,
+    /// List sessions. --follow streams each record change.
+    Ps {
+        /// Only these sessions.
+        ids: Vec<String>,
+        /// Only sessions in this state: running, held, ended, or lost.
+        #[arg(long, value_name = "STATE")]
+        state: Option<State>,
+        /// Print every record, then each change, until interrupted.
+        #[arg(long)]
+        follow: bool,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Start a session. Prints its id; exits 3 at the group's limit.
+    Start(Box<StartArgs>),
+    /// Drop into a session's terminal. C-] leaves it running.
+    Attach {
+        /// The session.
+        id: String,
+    },
+    /// End a session and close its pane.
+    Stop {
+        /// The session.
+        id: String,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Continue a held or ended session's conversation in a new pane.
+    Resume {
+        /// The session.
+        id: String,
+        /// The prompt, from this file or standard input for `-`. A
+        /// headless session needs one.
+        #[arg(long, value_name = "PATH|-")]
+        prompt_file: Option<PathBuf>,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Restart an interactive session on its conversation.
+    Restart {
+        /// The session.
+        id: String,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Type text into a running interactive session, then Enter.
+    Send {
+        /// The session.
+        id: String,
+        /// The text, from this file or standard input for `-`.
+        #[arg(long, value_name = "PATH|-", default_value = "-")]
+        prompt_file: PathBuf,
+    },
+    /// Print a headless session's events as JSON lines.
+    Events {
+        /// The session.
+        id: String,
+        /// Only events after this sequence number.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        since: u64,
+        /// Keep printing new events until the session stops running.
+        #[arg(long)]
+        follow: bool,
+        /// Print each event's summary line instead of JSON.
+        #[arg(long)]
+        text: bool,
+    },
+    /// Print a session's screen as plain text.
+    Screen {
+        /// The session.
+        id: String,
+        /// Print the screen again each time it changes.
+        #[arg(long)]
+        follow: bool,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Delete an ended session's record, events, and temp dir.
+    Rm {
+        /// The session.
+        id: String,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// The harness builds kersh would run.
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommand,
+    },
+    /// Write agent files into the user-level store.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Write and list runtimes in runtimes.yml.
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
+    /// Run gaff's registration for a harness and check its wiring.
+    /// Exits 1 when a piece is missing.
+    Setup {
+        /// claude-code or codex.
+        harness: Harness,
+        #[command(flatten)]
+        json: JsonArg,
+    },
+    /// Print the agent-memory block for a gaff section.
+    Memories {
+        /// The notes store; the configured memory.root by default.
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+    },
+    /// Run the session host in the foreground.
+    Host {
+        #[arg(long, value_name = "DIR", hide = true)]
+        state: Option<PathBuf>,
+    },
+    /// The session server role.
+    #[command(hide = true)]
+    Mux {
+        #[arg(long, value_name = "DIR")]
+        state: Option<PathBuf>,
+    },
+    /// The wrapper roles inside a session pane.
+    #[command(hide = true)]
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Print the environment, NUL-framed, for the login capture.
+    #[command(hide = true)]
+    EnvDump,
+}
+
+#[derive(Debug, Args)]
+struct StartArgs {
+    /// The agent file to start. Without one, --harness or --runtime is
+    /// required.
+    agent: Option<String>,
+    /// A runtime from runtimes.yml, over the agent's own.
+    #[arg(long, value_name = "NAME")]
+    runtime: Option<String>,
+    /// claude-code or codex.
+    #[arg(long, value_name = "HARNESS")]
+    harness: Option<Harness>,
+    /// headless or interactive.
+    #[arg(long, value_name = "MODE")]
+    mode: Option<Mode>,
+    /// The harness's model.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+    /// Replace the agent's almanac skill.
+    #[arg(long, value_name = "SKILL")]
+    skill: Option<String>,
+    /// The gaff profile.
+    #[arg(long, value_name = "PROFILE")]
+    profile: Option<String>,
+    /// Add this file's text to the agent's instructions.
+    #[arg(long, value_name = "PATH")]
+    instructions_file: Option<PathBuf>,
+    /// The working directory; the current one by default.
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
+    /// Give the session its own temp dir, kept with its record.
+    #[arg(long)]
+    tempdir: bool,
+    /// A label kersh stores and echoes, never reads. Repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    labels: Vec<String>,
+    /// The session's group, for --max-running.
+    #[arg(long, value_name = "GROUP")]
+    group: Option<String>,
+    /// Refuse the start, exit 3, when the group already has this many
+    /// sessions running.
+    #[arg(long, value_name = "N", requires = "group")]
+    max_running: Option<u32>,
+    /// A name for the session.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// The first prompt, from this file or standard input for `-`. A
+    /// headless start needs one.
+    #[arg(long, value_name = "PATH|-")]
+    prompt_file: Option<PathBuf>,
+    /// Resume this harness conversation instead of starting a new one.
+    #[arg(long, value_name = "ID")]
+    resume_conversation: Option<String>,
+    #[command(flatten)]
+    json: JsonArg,
+    /// Flags for the harness, after `--`, checked against its allow-list.
+    #[arg(last = true, value_name = "HARNESS FLAGS")]
+    harness_flags: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum HarnessCommand {
+    /// The path and version of each harness on the login PATH.
+    List {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Copy an agent file into ~/.config/kersh/agents/<name>/AGENT.md.
+    Add {
+        /// The agent file.
+        file: PathBuf,
+        /// Replace an existing file that differs.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommand {
+    /// Add or replace a runtime from a YAML file.
+    Add {
+        /// The runtime's name.
+        name: String,
+        /// A YAML file with the runtime's fields.
+        file: PathBuf,
+    },
+    /// List every runtime.
+    List {
+        #[command(flatten)]
+        json: JsonArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// Run a session's harness inside its pane.
+    Run {
+        #[arg(long, value_name = "DIR")]
+        state: Option<PathBuf>,
+        id: String,
+    },
+    /// Run a program in a new session with no controlling terminal.
+    SetsidExec {
+        #[arg(last = true, required = true)]
+        argv: Vec<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -154,22 +407,26 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Init { name, root } => init(&name, root),
-        Command::List { root, json } => list(&client(root.root.as_deref()), json.json),
-        Command::Show { name, root, json } => show(&client(root.root.as_deref()), &name, json.json),
-        Command::Check { root, json } => check(&client(root.root.as_deref()), json.json),
+        Command::List { root, json } => with_client(root.root.as_deref(), |c| list(c, json.json)),
+        Command::Show { name, root, json } => {
+            with_client(root.root.as_deref(), |c| show(c, &name, json.json))
+        }
+        Command::Check { root, json } => with_client(root.root.as_deref(), |c| check(c, json.json)),
         Command::Render {
             name,
             context_file,
             root,
             json,
             prompt,
-        } => render(
-            &client(root.root.as_deref()),
-            &name,
-            context_file.as_deref(),
-            prompt.as_deref().unwrap_or_default(),
-            json.json,
-        ),
+        } => with_client(root.root.as_deref(), |c| {
+            render(
+                c,
+                &name,
+                context_file.as_deref(),
+                prompt.as_deref().unwrap_or_default(),
+                json.json,
+            )
+        }),
         Command::Run {
             name,
             context_file,
@@ -189,7 +446,123 @@ fn dispatch(command: Command) -> ExitCode {
             print!("{PRIME}");
             ExitCode::SUCCESS
         }
+        command => command_into(command).map_or(ExitCode::FAILURE, crate::cli_sessions::dispatch),
     }
+}
+
+/// A session command, for its own module; `None` for the others.
+#[allow(clippy::too_many_lines)] // One arm per command.
+fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
+    use crate::cli_sessions::SessionCmd as S;
+    Some(match command {
+        Command::Ps {
+            ids,
+            state,
+            follow,
+            json,
+        } => S::Ps {
+            ids,
+            state,
+            follow,
+            json: json.json,
+        },
+        Command::Start(args) => {
+            let args = *args;
+            S::Start {
+                request: Box::new(crate::cli_sessions::StartInput {
+                    agent: args.agent,
+                    runtime: args.runtime,
+                    harness: args.harness,
+                    mode: args.mode,
+                    model: args.model,
+                    skill: args.skill,
+                    profile: args.profile,
+                    instructions_file: args.instructions_file,
+                    cwd: args.cwd,
+                    tempdir: args.tempdir,
+                    labels: args.labels,
+                    group: args.group,
+                    max_running: args.max_running,
+                    name: args.name,
+                    prompt_file: args.prompt_file,
+                    resume_conversation: args.resume_conversation,
+                    harness_flags: args.harness_flags,
+                }),
+                json: args.json.json,
+            }
+        }
+        Command::Attach { id } => S::Attach { id },
+        Command::Stop { id, json } => S::Stop {
+            id,
+            json: json.json,
+        },
+        Command::Resume {
+            id,
+            prompt_file,
+            json,
+        } => S::Resume {
+            id,
+            prompt_file,
+            json: json.json,
+        },
+        Command::Restart { id, json } => S::Restart {
+            id,
+            json: json.json,
+        },
+        Command::Send { id, prompt_file } => S::Send { id, prompt_file },
+        Command::Events {
+            id,
+            since,
+            follow,
+            text,
+        } => S::Events {
+            id,
+            since,
+            follow,
+            text,
+        },
+        Command::Screen { id, follow, json } => S::Screen {
+            id,
+            follow,
+            json: json.json,
+        },
+        Command::Rm { id, json } => S::Rm {
+            id,
+            json: json.json,
+        },
+        Command::Harness {
+            command: HarnessCommand::List { json },
+        } => S::HarnessList { json: json.json },
+        Command::Agent {
+            command: AgentCommand::Add { file, force },
+        } => S::AgentAdd { file, force },
+        Command::Runtime { command } => match command {
+            RuntimeCommand::Add { name, file } => S::RuntimeAdd { name, file },
+            RuntimeCommand::List { json } => S::RuntimeList { json: json.json },
+        },
+        Command::Setup { harness, json } => S::Setup {
+            harness,
+            json: json.json,
+        },
+        Command::Memories { root } => S::Memories { root },
+        Command::Host { state } => S::Host { state },
+        Command::Mux { state } => S::Mux { state },
+        Command::Session {
+            command: SessionCommand::Run { state, id },
+        } => S::WrapperRun { state, id },
+        Command::Session {
+            command: SessionCommand::SetsidExec { argv },
+        } => S::SetsidExec { argv },
+        Command::EnvDump => S::EnvDump,
+        Command::Init { .. }
+        | Command::List { .. }
+        | Command::Show { .. }
+        | Command::Check { .. }
+        | Command::Render { .. }
+        | Command::Run { .. }
+        | Command::Docs
+        | Command::Prime => return None,
+    })
 }
 
 /// `kersh init [name]` — scaffold a kersh root.
@@ -265,18 +638,20 @@ fn agent_template(name: &str) -> String {
     )
 }
 
-/// The stores for `--root`, or found from the current directory.
-fn stores(root: Option<&Path>) -> Stores {
+/// The client over `--root`, or over the stores found from the current
+/// directory. A `--root` without `kersh.yml` is an error.
+fn client(root: Option<&Path>) -> Result<Client, String> {
     if let Some(root) = root {
-        return Stores::from_root(root.to_path_buf());
+        return Client::from_root(root.to_path_buf()).map_err(|error| error.to_string());
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = crate::store::user_home();
-    Stores::discover(&cwd, home.as_deref())
+    Ok(Client::discover(&cwd))
 }
 
-fn client(root: Option<&Path>) -> Client {
-    Client::new(stores(root))
+/// Run `command` over the client for `root`, or fail with why the root
+/// does not open.
+fn with_client(root: Option<&Path>, command: impl FnOnce(&Client) -> ExitCode) -> ExitCode {
+    client(root).map_or_else(|error| fail(&error), |client| command(&client))
 }
 
 /// Print `value` as one JSON line.
@@ -351,6 +726,7 @@ enum CheckLine<'a> {
         agents: usize,
         problems: usize,
         ok: bool,
+        roots: &'a [PathBuf],
     },
 }
 
@@ -371,6 +747,7 @@ fn check(client: &Client, json: bool) -> ExitCode {
             agents: report.agents,
             problems: report.problems.len(),
             ok: report.ok(),
+            roots: &report.roots,
         };
         for line in problems.chain(std::iter::once(summary)) {
             if let Err(error) = print_json(&line) {
@@ -424,11 +801,19 @@ fn run_agent(
     root: Option<PathBuf>,
     prompt: &str,
 ) -> ExitCode {
-    let stores = stores(root.as_deref());
-    let agent = match stores.load(name) {
+    let client = match client(root.as_deref()) {
+        Ok(client) => client,
+        Err(error) => return fail(&error),
+    };
+    let agent = match client.stores().load(name) {
         Ok(agent) => agent,
         Err(error) => return fail(&error.to_string()),
     };
+    if agent.meta.model.is_empty() {
+        return fail(&format!(
+            "`{name}` names no model, so rig cannot run it; `kersh start {name}` runs it in a session"
+        ));
+    }
     let context = match context_file.map(read_context).transpose() {
         Ok(context) => context,
         Err(error) => return fail(&error),
@@ -576,6 +961,7 @@ fn fail(message: &str) -> ExitCode {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::store::Stores;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()

@@ -1,21 +1,27 @@
 //! The library API over a kersh root.
 //!
-//! A linked program reads agents through [`Client`]; the CLI calls the
-//! same methods. Every method has a command that prints the same data as
-//! JSON with `--json`, one object per line for a list, so anything a
-//! linked program can do also works from a shell.
+//! A linked program reads agents and drives sessions through [`Client`];
+//! the CLI calls the same methods. Every method has a command that prints
+//! the same data as JSON with `--json`, one object per line for a list,
+//! so anything a linked program can do also works from a shell.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::agent::{Agent, LoadError};
+use crate::paths::Paths;
 use crate::store::Stores;
 
-/// Reads over the agent stores.
+mod session_calls;
+
+pub use session_calls::RecordStream;
+
+/// Reads over the agent stores, and the session calls.
 #[derive(Debug, Clone)]
 pub struct Client {
     stores: Stores,
+    paths: Paths,
 }
 
 /// One row of [`Client::list`]: an agent that loads, or a file that does
@@ -67,6 +73,8 @@ pub struct AgentDetail {
 pub struct CheckReport {
     pub agents: usize,
     pub problems: Vec<BrokenAgent>,
+    /// The directories names resolve against, nearest first.
+    pub roots: Vec<PathBuf>,
 }
 
 impl CheckReport {
@@ -92,19 +100,34 @@ pub enum ClientError {
     /// The agent names an almanac skill that does not resolve.
     #[error("{0}")]
     Skill(String),
+    /// An explicit root that is missing or has no `kersh.yml`.
+    #[error("`{}` is not a kersh root (no kersh.yml)", .0.display())]
+    NotARoot(PathBuf),
 }
 
 impl Client {
     /// A client over the given stores.
     #[must_use]
     pub fn new(stores: Stores) -> Self {
-        Self { stores }
+        Self {
+            stores,
+            paths: Paths::discover(),
+        }
     }
 
-    /// A client over one explicit root, as `--root` gives.
-    #[must_use]
-    pub fn from_root(root: PathBuf) -> Self {
-        Self::new(Stores::from_root(root))
+    /// A client over one explicit root, as `--root` gives. A directory
+    /// without `kersh.yml` is refused, so a mistyped root fails instead of
+    /// reading as an empty store.
+    pub fn from_root(root: PathBuf) -> Result<Self, ClientError> {
+        if !root.join(crate::store::ROOT_MARKER).is_file() {
+            return Err(ClientError::NotARoot(root));
+        }
+        Ok(Self::new(Stores::from_root(root)))
+    }
+
+    /// The stores this client reads, for the CLI's run path.
+    pub(crate) fn stores(&self) -> &Stores {
+        &self.stores
     }
 
     /// A client over the stores found from `cwd`: the nearest root up the
@@ -175,6 +198,7 @@ impl Client {
         CheckReport {
             agents: names.len(),
             problems,
+            roots: self.stores.dirs().to_vec(),
         }
     }
 
@@ -246,7 +270,7 @@ mod tests {
     #[test]
     fn list_reports_loaded_and_broken_agents_in_name_order() {
         let tmp = root();
-        let client = Client::from_root(tmp.path().to_path_buf());
+        let client = Client::from_root(tmp.path().to_path_buf()).unwrap();
         let entries = client.list();
         let [ListEntry::Broken(broken), ListEntry::Agent(reviewer)] = entries.as_slice() else {
             panic!("{entries:?}");
@@ -265,6 +289,7 @@ mod tests {
     fn show_returns_the_body_and_the_limits() {
         let tmp = root();
         let detail = Client::from_root(tmp.path().to_path_buf())
+            .unwrap()
             .show("reviewer")
             .unwrap();
         assert_eq!(detail.body, "You review diffs.");
@@ -276,6 +301,7 @@ mod tests {
     fn show_of_a_missing_agent_is_not_found() {
         let tmp = root();
         let error = Client::from_root(tmp.path().to_path_buf())
+            .unwrap()
             .show("nope")
             .unwrap_err();
         assert!(matches!(error, ClientError::Load(LoadError::NotFound(_))));
@@ -284,7 +310,7 @@ mod tests {
     #[test]
     fn check_counts_agents_and_names_each_problem() {
         let tmp = root();
-        let report = Client::from_root(tmp.path().to_path_buf()).check();
+        let report = Client::from_root(tmp.path().to_path_buf()).unwrap().check();
         assert_eq!(report.agents, 2);
         assert!(!report.ok());
         assert_eq!(report.problems.len(), 1);
@@ -295,6 +321,7 @@ mod tests {
     fn render_composes_without_a_skill() {
         let tmp = root();
         let rendered = Client::from_root(tmp.path().to_path_buf())
+            .unwrap()
             .render("reviewer", None, "go")
             .unwrap();
         assert_eq!(rendered.system, "You review diffs.");

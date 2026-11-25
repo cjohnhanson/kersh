@@ -1,0 +1,10 @@
+End a session and close its pane
+
+Usage: kersh stop [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --json  Print JSON, one object per line
+  -h, --help  Print help

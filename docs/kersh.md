@@ -31,7 +31,11 @@ prompt as the agent's method, and aborts if it cannot resolve.
 A directory with `kersh.yml` is a root. The nearest one up the tree is
 the active root. `~/.config/kersh/agents/` is the user-level fallback.
 An agent named `<name>` is `agents/<name>/AGENT.md` under a root. The
-nearer root wins a name collision.
+nearer root wins a name collision. With `HOME` unset, the user database
+names the home directory.
+
+`--root <dir>` reads that root alone. A directory without `kersh.yml` is
+refused with exit 1.
 
 ## Commands
 
@@ -40,7 +44,8 @@ nearer root wins a name collision.
   a file, and `name` defaults to `reviewer`.
 - `kersh list` names the agents.
 - `kersh show <name>` prints an agent's frontmatter and body.
-- `kersh check` validates every agent file.
+- `kersh check` validates every agent file. With `--json`, its closing
+  summary line lists the `roots` it searched, nearest first.
 - `kersh render <name> [--context-file <path|->] [prompt]` prints the
   composed system prompt and first user turn without spending a turn.
 - `kersh docs` prints this document.

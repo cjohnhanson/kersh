@@ -1,0 +1,10 @@
+Delete an ended session's record, events, and temp dir
+
+Usage: kersh rm [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+      --json  Print JSON, one object per line
+  -h, --help  Print help

@@ -1,0 +1,6 @@
+Run the session host in the foreground
+
+Usage: kersh host
+
+Options:
+  -h, --help  Print help

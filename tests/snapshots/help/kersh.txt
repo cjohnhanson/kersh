@@ -3,15 +3,31 @@ Run declarative agents. An agent file names a model, a skill, and a gaff profile
 Usage: kersh <COMMAND>
 
 Commands:
-  init    Create a kersh root and a starter agent. Existing files are kept
-  list    List every agent and its description
-  show    Print an agent's settings and system prompt
-  check   Check that every agent file loads. Exits 1 when one does not
-  render  Print the prompt a run would send, without calling the model
-  run     Run an agent and print its final answer
-  docs    Print the kersh manual
-  prime   Print a short primer for an agent's context
-  help    Print this message or the help of the given subcommand(s)
+  init      Create a kersh root and a starter agent. Existing files are kept
+  list      List every agent and its description
+  show      Print an agent's settings and system prompt
+  check     Check that every agent file loads. Exits 1 when one does not
+  render    Print the prompt a run would send, without calling the model
+  run       Run an agent and print its final answer
+  docs      Print the kersh manual
+  prime     Print a short primer for an agent's context
+  ps        List sessions. --follow streams each record change
+  start     Start a session. Prints its id; exits 3 at the group's limit
+  attach    Drop into a session's terminal. C-] leaves it running
+  stop      End a session and close its pane
+  resume    Continue a held or ended session's conversation in a new pane
+  restart   Restart an interactive session on its conversation
+  send      Type text into a running interactive session, then Enter
+  events    Print a headless session's events as JSON lines
+  screen    Print a session's screen as plain text
+  rm        Delete an ended session's record, events, and temp dir
+  harness   The harness builds kersh would run
+  agent     Write agent files into the user-level store
+  runtime   Write and list runtimes in runtimes.yml
+  setup     Run gaff's registration for a harness and check its wiring. Exits 1 when a piece is missing
+  memories  Print the agent-memory block for a gaff section
+  host      Run the session host in the foreground
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help

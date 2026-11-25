@@ -1,0 +1,9 @@
+Drop into a session's terminal. C-] leaves it running
+
+Usage: kersh attach <ID>
+
+Arguments:
+  <ID>  The session
+
+Options:
+  -h, --help  Print help

@@ -1,0 +1,10 @@
+Run gaff's registration for a harness and check its wiring. Exits 1 when a piece is missing
+
+Usage: kersh setup [OPTIONS] <HARNESS>
+
+Arguments:
+  <HARNESS>  claude-code or codex
+
+Options:
+      --json  Print JSON, one object per line
+  -h, --help  Print help

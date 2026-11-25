@@ -13,7 +13,9 @@ use std::process::Command;
 
 /// The subcommands, in the order the top-level help lists them.
 const COMMANDS: &[&str] = &[
-    "init", "list", "show", "check", "render", "run", "docs", "prime",
+    "init", "list", "show", "check", "render", "run", "docs", "prime", "ps", "start", "attach",
+    "stop", "resume", "restart", "send", "events", "screen", "rm", "harness", "agent", "runtime",
+    "setup", "memories", "host",
 ];
 
 fn snapshot_dir() -> PathBuf {
