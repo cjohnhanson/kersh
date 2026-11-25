@@ -1,0 +1,9 @@
+signoff[review-code] PASS a8f7e57 round-3 reader passed the code on a05f990 (systemd states, fallbacks, no real manager reachable); since then src changed only in comments (git diff a05f990 a8f7e57 -- src shows comment lines only), and round 5 checked those comments against the code (shell runs in the root, not confined; read tools unused)
+
+signoff[review-tests] PASS a8f7e57 rounds 1-3 mutated every guard red (workflow job and step gates, service install over an unloaded unit, installed_for, doctor version check, doctor writes nothing, unit mode 0600, launchd and systemd fallbacks, systemd loaded()); no test changed after a05f990; pre-push suite green on a8f7e57
+
+signoff[review-docs] PASS a8f7e57 round-6 reader swept README.md, docs/kersh.md, help snapshots and the session_calls/service comments; credentials, host auto-start and exit codes match src/ and agree across README and manual; rounds 4-5 blockers and majors (confined shell, only-op-run credentials, claude-code sign-in) fixed
+
+signoff[review-deps] PASS a8f7e57 only the version bump and package metadata change in Cargo files; no new dependency
+
+signoff[review-usability] PASS a8f7e57 round-5 cold walk of the README in a temp HOME: init, check, check --json, render, list, show, docs, harness list, doctor behave as documented; refusals exit as documented and name the fix
