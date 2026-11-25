@@ -1,7 +1,7 @@
 //! Running an agent through rig.
 //!
-//! The agent gets one tool, a shell, confined to the run's root. The gaff
-//! profile decides what it may run.
+//! The agent gets one tool, a shell, run in the run's root directory. The
+//! gaff profile decides what it may run; nothing else confines it.
 //! The provider is chosen from the model's prefix: `claude-code/<model>`
 //! runs the local `claude` CLI, and `anthropic/<model>` uses an API key.
 //! The agent's system prompt is its preamble, and the composed first turn
@@ -36,7 +36,7 @@ pub enum RunError {
 }
 
 /// Run `agent` with `system` as its preamble and `first_turn` as its
-/// prompt, its tools confined to `root`.
+/// prompt, its shell run in `root`.
 ///
 /// When `gaff` is set, the run is governed: a rig hook calls `gaff hook`
 /// at each tool call and at each stop, so the profile's guards and stop
@@ -68,7 +68,7 @@ pub async fn run(
 
     // Claude Code attaches its working directory's files and every
     // CLAUDE.md up the tree once it has tools, which a large repo balloons
-    // past the token limit. The agent's bash tool runs in the confined root,
+    // past the token limit. The agent's bash tool runs in the run's root,
     // so claude needs no project directory. Run it in a fresh directory
     // under the temp root, outside the home tree, so no ambient CLAUDE.md
     // loads. The directory is removed after the run.
@@ -185,9 +185,9 @@ async fn drive<M: CompletionModel + 'static>(
 
 // The one tool an agent gets: a shell. kersh does not decide what it may
 // run; the gaff profile does, through the pre-tool-call hook. The command
-// runs in the confined root. A single command tool carries none of the
-// working directory into the model's request, unlike a per-file tool
-// bridged over the root.
+// runs in the root's directory, which does not confine it. A single
+// command tool carries none of the working directory into the model's
+// request, unlike a per-file tool bridged over the root.
 
 /// The per-command deadline. A read command answers well within it.
 const BASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);

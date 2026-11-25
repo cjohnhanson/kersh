@@ -1,4 +1,5 @@
-//! The read tools an agent gets: `read_file`, `grep`, and `list`.
+//! Read tools over a confined root: `read_file`, `grep`, and `list`. No
+//! agent is given them today; `Root` alone is used, to name the run's root.
 //!
 //! Each is a pure function over a confined root, implemented with
 //! ripgrep's libraries, so there is no shell and no honored ignore or

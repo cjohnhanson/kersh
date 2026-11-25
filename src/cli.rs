@@ -907,8 +907,8 @@ fn render(
 /// Without `--output jsonl`, the final text goes to standard output and
 /// nothing else does, because gaff reads a hook agent's verdict from that
 /// stream. With it, each event is one JSON line and the result, with the
-/// final text, is the last. The tools are confined to the current
-/// directory, or `--root`.
+/// final text, is the last. The shell tool runs in the current
+/// directory, or `--root`; only a gaff profile restricts it.
 fn run_agent(args: &RunArgs) -> ExitCode {
     let stream = (args.output == RunOutput::Jsonl).then(crate::jsonl::Stream::stdout);
     match run_inner(args, stream.as_ref()) {
