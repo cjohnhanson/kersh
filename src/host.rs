@@ -15,7 +15,7 @@
 
 mod restoring;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,6 +89,9 @@ struct Host {
     /// When the watcher last tried to restore each session, so a restore
     /// that cannot create its pane is not retried on every tick.
     attempted: std::sync::Mutex<HashMap<String, Instant>>,
+    /// The record files the background paths last found unreadable, so
+    /// each is logged once while it stays so.
+    unread: std::sync::Mutex<HashSet<PathBuf>>,
 }
 
 /// Run the host until it is killed. Returns at once, successfully, when
@@ -137,6 +140,7 @@ pub fn run(paths: Paths) -> Result<(), String> {
         searched: std::sync::Mutex::new(HashMap::new()),
         skew: AtomicBool::new(false),
         attempted: std::sync::Mutex::new(HashMap::new()),
+        unread: std::sync::Mutex::new(HashSet::new()),
     });
     let result = runtime.block_on(serve(host));
     drop(lock);
@@ -360,6 +364,29 @@ impl Host {
                 Ok(Value::Null)
             }
             Op::RestartMux => to_value(&self.restart_mux().await?),
+        }
+    }
+
+    /// The records a background path (restore, the watcher, captures,
+    /// the prune) acts on. A record that does not read is skipped and
+    /// logged once while it stays unreadable; the others still go on.
+    fn background_records(&self) -> Vec<Record> {
+        let (records, unread) = crate::session::read_records_skipping(&self.paths.sessions());
+        if let Ok(mut logged) = self.unread.lock() {
+            for (path, error) in &unread {
+                if !logged.contains(path) {
+                    eprintln!("kersh host: skipped an unreadable record: {error}");
+                }
+            }
+            *logged = unread.into_iter().map(|(path, _)| path).collect();
+        }
+        records
+    }
+
+    /// [`Self::save`] where a failure has no caller to go to: it is logged.
+    fn save_or_log(&self, record: &Record) {
+        if let Err(error) = self.save(record) {
+            eprintln!("kersh host: session {}: {error}", record.id);
         }
     }
 
@@ -887,13 +914,23 @@ impl Host {
         // Before the pane goes: a refused relaunch leaves the session as
         // it was.
         self.check_conversation_free(record.harness, &conversation.id, Some(&record))?;
-        self.end_pane(mux, &record).await?;
-        if let Some(pgid) = record.pgid
+        let old_group = restoring::old_group(&record);
+        let running = record.state == State::Running;
+        // A pane that is not running holds no harness, so a process in
+        // the recorded group is the old session's, and the pane stays.
+        if !running
+            && let Some(pgid) = old_group
             && crate::restore::group_alive(pgid)
         {
-            return Err(SessionError::failed(format!(
-                "a process from the old session still runs in process group {pgid}; end it first"
-            )));
+            return Err(restoring::old_group_runs(pgid));
+        }
+        self.end_pane(mux, &record).await?;
+        // A running harness's group empties once its pane ends.
+        if running
+            && let Some(pgid) = old_group
+            && !restoring::group_empties(pgid).await
+        {
+            return Err(restoring::old_group_runs(pgid));
         }
         self.launch_again(mux, &mut record, restoring::How::Resume { prompt }, None)
             .await?;
@@ -901,9 +938,11 @@ impl Host {
     }
 
     /// Refuse a conversation that another live record holds, or that a
-    /// harness process runs other than `own`'s own launch: its wrapper,
-    /// the wrapper's descendants, and its harness's process group, when
-    /// `own` is running or held and from this boot. A process table that
+    /// harness process runs other than `own`'s own launch: its wrapper and
+    /// the wrapper's descendants, when `own` is running or held and from
+    /// this boot, and its harness's process group, when `own` is running.
+    /// A held pane runs no harness, so its recorded group is the old
+    /// session's and a harness in it still counts. A process table that
     /// cannot be read refuses too. Called under the writer lock.
     fn check_conversation_free(
         &self,
@@ -912,41 +951,53 @@ impl Host {
         own: Option<&Record>,
     ) -> Result<(), SessionError> {
         let records = crate::session::read_records(&self.paths.sessions())?;
-        if let Some(other) = records.iter().find(|record| {
-            Some(record.id.as_str()) != own.map(|own| own.id.as_str())
-                && matches!(record.state, State::Running | State::Held)
-                && record
-                    .conversation
-                    .as_ref()
-                    .is_some_and(|conversation| conversation.id == id)
-        }) {
-            return Err(SessionError::failed(format!(
-                "session {} already holds conversation {id}",
-                other.id
-            )));
-        }
-        // Only a live record's process ids are its own: an ended record's
-        // may name other processes now, and so may ids from another boot
-        // or from a boot either side cannot name.
-        let boot = crate::service::boot_id();
-        let own = own
-            .filter(|record| matches!(record.state, State::Running | State::Held))
-            .filter(|record| match (&record.boot_id, &boot) {
-                (Some(then), Some(now)) => then == now,
-                _ => false,
-            })
-            .map(|record| crate::discover::Own {
-                roots: record
-                    .wrapper_pid
-                    .into_iter()
-                    .chain(record.harness_pid)
-                    .collect(),
-                pgid: record.pgid,
-            })
-            .unwrap_or_default();
-        holder_verdict(id, crate::discover::holder(harness.program(), id, &own))
+        conversation_free_among(&records, harness, id, own)
     }
+}
 
+/// [`Host::check_conversation_free`] against `records`.
+fn conversation_free_among(
+    records: &[Record],
+    harness: Harness,
+    id: &str,
+    own: Option<&Record>,
+) -> Result<(), SessionError> {
+    if let Some(other) = records.iter().find(|record| {
+        Some(record.id.as_str()) != own.map(|own| own.id.as_str())
+            && matches!(record.state, State::Running | State::Held)
+            && record
+                .conversation
+                .as_ref()
+                .is_some_and(|conversation| conversation.id == id)
+    }) {
+        return Err(SessionError::failed(format!(
+            "session {} already holds conversation {id}",
+            other.id
+        )));
+    }
+    // Only a live record's process ids are its own: an ended record's
+    // may name other processes now, and so may ids from another boot
+    // or from a boot either side cannot name.
+    let boot = crate::service::boot_id();
+    let own = own
+        .filter(|record| matches!(record.state, State::Running | State::Held))
+        .filter(|record| match (&record.boot_id, &boot) {
+            (Some(then), Some(now)) => then == now,
+            _ => false,
+        })
+        .map(|record| crate::discover::Own {
+            roots: record
+                .wrapper_pid
+                .into_iter()
+                .chain(record.harness_pid)
+                .collect(),
+            pgid: record.pgid.filter(|_| record.state == State::Running),
+        })
+        .unwrap_or_default();
+    holder_verdict(id, crate::discover::holder(harness.program(), id, &own))
+}
+
+impl Host {
     /// The environment of a relaunch: the last launch's, which already
     /// holds the login environment and kersh's variables. Without one, the
     /// login environment.
@@ -1019,10 +1070,7 @@ impl Host {
 
     /// Fold every live session's note into its record.
     async fn watch_once(&self) {
-        let Ok(records) = crate::session::read_records(&self.paths.sessions()) else {
-            return;
-        };
-        for record in records {
+        for record in self.background_records() {
             if !matches!(record.state, State::Running | State::Held) {
                 continue;
             }
@@ -1164,6 +1212,7 @@ mod tests {
             searched: std::sync::Mutex::new(HashMap::new()),
             skew: AtomicBool::new(false),
             attempted: std::sync::Mutex::new(HashMap::new()),
+            unread: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -1353,6 +1402,95 @@ mod tests {
             "the pane was killed"
         );
         assert_eq!(host.load("a").unwrap().state, State::Held);
+    }
+
+    /// A process in a process group of its own, as an old session's
+    /// group is.
+    fn own_group(program: &str, args: &[&str]) -> (std::process::Child, i32) {
+        use std::os::unix::process::CommandExt as _;
+        let child = std::process::Command::new(program)
+            .args(args)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = i32::try_from(child.id()).unwrap();
+        (child, pgid)
+    }
+
+    fn end_group(mut child: std::process::Child, pgid: i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn a_resume_refused_for_the_old_group_leaves_the_pane_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let (child, pgid) = own_group("/bin/sleep", &["30"]);
+        let mut held = record("a", State::Held, None, &conversation_id());
+        held.pgid = Some(pgid);
+        held.boot_id = crate::service::boot_id();
+        put(&host, &held);
+        let fake = Fake::default();
+        let result = host.resume_on(&fake, "a", None).await;
+        end_group(child, pgid);
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("kill -- -{pgid}")),
+            "{error}"
+        );
+        assert!(
+            fake.killed.lock().unwrap().is_empty(),
+            "the pane was killed"
+        );
+        assert_eq!(host.load("a").unwrap(), held);
+    }
+
+    #[tokio::test]
+    async fn a_restart_waits_for_the_old_group_to_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let (mut child, pgid) = own_group("/bin/sleep", &["1"]);
+        let reaper = std::thread::spawn(move || child.wait());
+        let mut running = record("a", State::Running, None, &conversation_id());
+        running.pgid = Some(pgid);
+        running.boot_id = crate::service::boot_id();
+        put(&host, &running);
+        let fake = Fake::default();
+        let restarted = host.restart_on(&fake, "a").await;
+        let _ = reaper.join();
+        let restarted = restarted.unwrap();
+        assert_eq!((restarted.state, restarted.launches), (State::Running, 2));
+    }
+
+    #[test]
+    fn a_held_record_does_not_own_its_old_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = host(tmp.path());
+        let script = tmp.path().join("claude");
+        std::fs::write(&script, "while :; do sleep 1; done\n").unwrap();
+        let conversation = conversation_id();
+        let (child, pgid) = own_group(
+            "/bin/sh",
+            &[script.to_str().unwrap(), "--resume", &conversation],
+        );
+        let mut held = record("a", State::Held, None, &conversation);
+        held.pgid = Some(pgid);
+        held.boot_id = crate::service::boot_id();
+        let as_held = host.check_conversation_free(Harness::ClaudeCode, &conversation, Some(&held));
+        let mut running = held.clone();
+        running.state = State::Running;
+        let as_running =
+            host.check_conversation_free(Harness::ClaudeCode, &conversation, Some(&running));
+        end_group(child, pgid);
+        let error = as_held.unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("pid {pgid}")),
+            "{error}"
+        );
+        as_running.unwrap();
     }
 
     #[tokio::test]

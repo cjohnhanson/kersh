@@ -145,13 +145,10 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Delete every ended session that ended more than [`KEEP_ENDED`] before
-/// `now`: its record, events, captures, and temp dir. Returns the ids.
-/// Called by the host under its writer lock.
-pub fn prune(paths: &Paths, now: SystemTime) -> Vec<String> {
-    let Ok(records) = crate::session::read_records(&paths.sessions()) else {
-        return Vec::new();
-    };
+/// Delete every session of `records` that ended more than [`KEEP_ENDED`]
+/// before `now`: its record, events, captures, and temp dir. Returns the
+/// ids. Called by the host under its writer lock.
+pub fn prune(paths: &Paths, records: Vec<crate::session::Record>, now: SystemTime) -> Vec<String> {
     let now = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
@@ -243,10 +240,11 @@ mod tests {
         write("kept", "held");
         let day = Duration::from_secs(86_400);
         let at = |since: Duration| SystemTime::UNIX_EPOCH + ended_at + since;
+        let records = || crate::session::read_records(&paths.sessions()).unwrap();
 
-        assert!(prune(&paths, at(day * 29)).is_empty());
+        assert!(prune(&paths, records(), at(day * 29)).is_empty());
         assert!(paths.session("old").exists());
-        assert_eq!(prune(&paths, at(day * 31)), ["old"]);
+        assert_eq!(prune(&paths, records(), at(day * 31)), ["old"]);
         assert!(!paths.session("old").exists(), "record, events, and tmp go");
         assert!(paths.session("kept").exists(), "only ended records go");
     }

@@ -28,8 +28,10 @@ pub const CODEX_STREAM: &str = include_str!("../fixtures/codex-stream.jsonl");
 /// conversation id under `$HOME/.claude/projects/`, unless the prompt
 /// says `notranscript`. Headless (`-p`) it reads the prompt on stdin:
 /// `hang` prints init and sleeps, otherwise it replays the canned stream.
-/// Interactive, the last argument decides: `exit0`, `exit3`, or anything
-/// else to wait.
+/// Interactive, the last argument decides: `exit0`, `exit3`, `exitlater`
+/// to exit 0 after four seconds, `survivor` to leave a child in its
+/// process group that ignores HUP and TERM (its pid in
+/// `$HOME/fakelog/<session>.survivor`) and wait, or anything else to wait.
 pub const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
   if [ -f "$HOME/claude-version" ]; then cat "$HOME/claude-version"; else echo "2.1.999 (Claude Code)"; fi
@@ -65,6 +67,11 @@ case "$last" in *notranscript*) ;; *) transcript ;; esac
 case "$last" in
   exit0) echo "fake claude says hi"; sleep 1; exit 0 ;;
   exit3) echo "fake claude fails"; exit 3 ;;
+  exitlater) echo "fake claude exits soon"; sleep 4; exit 0 ;;
+  survivor)
+    ( trap '' HUP TERM; exec sleep 600 ) </dev/null >/dev/null 2>&1 &
+    echo "$!" > "$HOME/fakelog/$KERSH_SESSION.survivor"
+    echo "fake claude waiting"; exec sleep 600 ;;
   *) echo "fake claude waiting"; exec sleep 600 ;;
 esac
 "#;
@@ -420,6 +427,41 @@ impl Env {
         }
     }
 
+    /// The pid of the child a `survivor` launch of `id` left, once written.
+    pub fn survivor(&self, id: &str) -> i32 {
+        let path = self.home().join("fakelog").join(format!("{id}.survivor"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "no survivor for {id}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `kill -9` every child a `survivor` launch left.
+    fn kill_survivors(&self) {
+        let Ok(entries) = std::fs::read_dir(self.home().join("fakelog")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "survivor")
+                && let Some(pid) = std::fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok())
+            {
+                kill(pid, "KILL");
+            }
+        }
+    }
+
     /// The session server's view of a session, read directly.
     fn rmux_name(&self, id: &str) -> String {
         self.record(id)["rmux_session"].as_str().unwrap().to_owned()
@@ -450,6 +492,26 @@ impl Env {
         .unwrap();
     }
 
+    /// The pane's text with its line breaks taken out, once it contains
+    /// `needle`: a long line wraps at the pane's width.
+    pub fn wait_screen_flat(&self, id: &str, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let screen = self.kersh(&["screen", id]);
+            let text = String::from_utf8_lossy(&screen.stdout).replace('\n', "");
+            if text.contains(needle) {
+                return text;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the screen never showed {needle:?}: {text}{}\nhost log:\n{}",
+                stderr(&screen),
+                self.host_log()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// The pane's text, once it contains `needle`.
     pub fn wait_screen(&self, id: &str, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -472,6 +534,7 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        self.kill_survivors();
         self.stop_host();
         if let Some(pid) = self.mux_pid() {
             kill(pid, "TERM");

@@ -274,11 +274,135 @@ fn two_restores_never_put_two_processes_on_one_conversation() {
         "one process on the conversation"
     );
 
+    // RET on the held one is refused: the other holds the conversation.
+    let (held_id, running_id) = if a["state"] == "held" {
+        (first.as_str(), second)
+    } else {
+        (second, first.as_str())
+    };
+    env.type_into(held_id, "\r");
+    env.wait_screen(held_id, "RET refused");
+    let text = env.wait_screen_flat(held_id, "already holds conversation");
+    assert!(text.contains(running_id), "{text}");
+    assert_eq!(env.record(held_id)["state"], "held");
+    assert_eq!(env.live_on(&uuid).len(), 1);
+
     // A second host restart restores nothing that still runs.
     env.stop_host();
     env.start_host();
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(env.live_on(&uuid).len(), 1);
+}
+
+#[test]
+fn a_process_left_in_the_old_group_holds_the_session_and_refuses_ret_and_resume() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "survivor");
+    env.running_with_pid(&id);
+    let survivor = env.survivor(&id);
+
+    crash_and_restart(&env);
+
+    // The restore holds it: a process of the old group still runs.
+    let record = env.wait_restored(&id, 1, "held");
+    assert!(alive(survivor), "the survivor outlived the server");
+    let pgid = record["pgid"].as_i64().unwrap();
+    let reason = record["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(&format!("process group {pgid}")),
+        "{reason}"
+    );
+    assert_eq!(env.launches(&id).len(), 1, "nothing ran on restore");
+    env.wait_screen(&id, "RET resumes it");
+
+    // RET is refused while the group runs.
+    env.type_into(&id, "\r");
+    env.wait_screen(&id, "RET refused");
+    let text = env.wait_screen_flat(&id, "end it first");
+    assert!(text.contains(&format!("kill -- -{pgid}")), "{text}");
+    assert_eq!(env.record(&id)["state"], "held");
+    assert_eq!(env.launches(&id).len(), 1);
+
+    // `kersh resume` is refused, and the held pane is left alone.
+    let rmux = record["rmux_session"].clone();
+    let output = env.kersh(&["resume", &id]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("kill -- -{pgid}")),
+        "{}",
+        stderr(&output)
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let after = env.record(&id);
+    assert_eq!(after["state"], "held");
+    assert_eq!(after["rmux_session"], rmux);
+    assert_eq!(after["restores"].as_array().unwrap().len(), 1, "{after:#}");
+    assert_eq!(after["launches"], record["launches"]);
+    assert_eq!(env.launches(&id).len(), 1, "no new launch");
+    env.wait_screen(&id, "RET resumes it");
+}
+
+#[test]
+fn a_session_that_exits_while_the_host_is_stopped_stays_ended() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "exitlater");
+    let record = env.running_with_pid(&id);
+    let harness = i32::try_from(record["harness_pid"].as_i64().unwrap()).unwrap();
+    env.stop_host();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while alive(harness) {
+        assert!(Instant::now() < deadline, "the fake never exited");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The wrapper writes its note and the pane closes.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        env.record(&id)["state"],
+        "running",
+        "nothing folded the exit"
+    );
+
+    env.start_host();
+    std::thread::sleep(Duration::from_secs(2));
+    let record = env.record(&id);
+    assert_eq!(record["state"], "ended", "{record:#}");
+    assert_eq!(record["restores"], serde_json::json!([]));
+    assert_eq!(env.launches(&id).len(), 1);
+}
+
+#[test]
+fn one_unreadable_record_does_not_stop_a_restore() {
+    let env = Env::new();
+    let id = env.start(&["--harness", "claude-code"], "wait");
+    env.running_with_pid(&id);
+    let bad = env.state().join("sessions").join("cccccccccccc");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("record.json"), "{not json").unwrap();
+
+    crash_and_restart(&env);
+
+    env.wait_restored(&id, 1, "running");
+    assert!(
+        env.host_log().contains("cccccccccccc/record.json"),
+        "{}",
+        env.host_log()
+    );
+}
+
+#[test]
+fn restore_false_leaves_a_held_session_whose_pane_vanished() {
+    let env = Env::with_config("restore: false\n");
+    let id = env.start(&["--harness", "claude-code"], "exit3");
+    env.wait(&id, "held", |r| r["state"] == "held");
+    env.kill_session(&id);
+    env.stop_host();
+    env.start_host();
+    std::thread::sleep(Duration::from_secs(2));
+    let record = env.record(&id);
+    assert_eq!(record["state"], "held");
+    assert_eq!(record["restores"], serde_json::json!([]));
+    let screen = env.kersh(&["screen", &id]);
+    assert!(!screen.status.success(), "the pane came back");
 }
 
 #[test]

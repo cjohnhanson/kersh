@@ -256,26 +256,48 @@ fn hold_message(record: &Record, why: &str, ret: Option<HeldRun>) -> String {
     text
 }
 
+/// The record's old process group, unless a reboot since then ended
+/// every process of it.
+pub(super) fn old_group(record: &Record) -> Option<i32> {
+    let boot = crate::service::boot_id();
+    if record.boot_id.is_some() && boot.is_some() && record.boot_id != boot {
+        return None;
+    }
+    record.pgid
+}
+
+/// Whether process group `pgid` empties within
+/// [`crate::restore::GROUP_WAIT`].
+pub(super) async fn group_empties(pgid: i32) -> bool {
+    let deadline = Instant::now() + crate::restore::GROUP_WAIT;
+    while crate::restore::group_alive(pgid) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
+}
+
+/// The refusal while a process of the old session's group runs.
+pub(super) fn old_group_runs(pgid: i32) -> SessionError {
+    SessionError::failed(format!(
+        "a process from the old session still runs in process group {pgid}; \
+         end it first: kill -- -{pgid}"
+    ))
+}
+
 impl Host {
     /// Wait for the record's old process group to empty. False when no
     /// process of it remains (the pgid is then cleared); true when one
     /// still runs after [`crate::restore::GROUP_WAIT`].
     async fn wait_old_group(&self, record: &mut Record) -> bool {
-        let boot = crate::service::boot_id();
-        if record.boot_id.is_some() && boot.is_some() && record.boot_id != boot {
-            // After a reboot no process of the old session can survive.
+        let Some(pgid) = old_group(record) else {
             record.pgid = None;
             return false;
-        }
-        let Some(pgid) = record.pgid else {
-            return false;
         };
-        let deadline = Instant::now() + crate::restore::GROUP_WAIT;
-        while crate::restore::group_alive(pgid) {
-            if Instant::now() > deadline {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if !group_empties(pgid).await {
+            return true;
         }
         record.pgid = None;
         false
@@ -306,9 +328,7 @@ impl Host {
                 return;
             }
         };
-        let Ok(records) = crate::session::read_records(&self.paths.sessions()) else {
-            return;
-        };
+        let records = self.background_records();
         let enabled = self.config.restore();
         let boot = crate::service::boot_id();
         // Every vanished session is marked lost before any comes back, so
@@ -326,7 +346,7 @@ impl Host {
                 fold_note(&mut record, note);
             }
             if record.state == State::Ended {
-                let _ = self.save(&record);
+                self.save_or_log(&record);
                 continue;
             }
             let rebooted = record.boot_id.is_some() && boot.is_some() && record.boot_id != boot;
@@ -357,7 +377,7 @@ impl Host {
             if record.state == State::Held {
                 if !enabled {
                     if record != before {
-                        let _ = self.save(&record);
+                        self.save_or_log(&record);
                     }
                     continue;
                 }
@@ -387,7 +407,7 @@ impl Host {
             if record.state == State::Running {
                 record.state = State::Lost;
                 record.reason = Some(format!("lost after {after}"));
-                let _ = self.save(&record);
+                self.save_or_log(&record);
             }
             if enabled {
                 lost.push((record, after));
@@ -437,7 +457,12 @@ impl Host {
             .as_ref()
             .map(|conversation| conversation.id.clone())
             .unwrap_or_default();
-        match self.check_conversation_free(record.harness, &conversation, Some(record)) {
+        // A restore skips a record that does not read, as every
+        // background path does; the process table still guards the
+        // conversation.
+        let records = self.background_records();
+        match super::conversation_free_among(&records, record.harness, &conversation, Some(record))
+        {
             Ok(()) => Plan::Resume,
             Err(error) => Plan::Hold {
                 why: error.to_string(),
@@ -524,19 +549,26 @@ impl Host {
         let _guard = self.writer.lock().await;
         let mut record = self.load(id)?;
         let Some(ret) = record.held_run.filter(|_| record.state == State::Held) else {
+            let resume = match record.mode {
+                Mode::Headless => format!("`kersh resume {id} --prompt-file -` continues it"),
+                Mode::Interactive => format!("`kersh resume {id}` resumes it"),
+            };
+            let next = match record.state {
+                State::Held => format!("{resume}; `kersh stop {id}` ends it"),
+                State::Running => format!("`kersh stop {id}` ends it"),
+                State::Lost | State::Ended => resume,
+            };
             return Err(SessionError::failed(format!(
-                "session {id} is {} with nothing for RET to run",
+                "session {id} is {} with nothing for RET to run; {next}",
                 record.state
             )));
         };
-        if let Some(pgid) = record.pgid {
-            if crate::restore::group_alive(pgid) {
-                return Err(SessionError::failed(format!(
-                    "a process from the old session still runs in process group {pgid}; end it first"
-                )));
-            }
-            record.pgid = None;
+        if let Some(pgid) = old_group(&record)
+            && crate::restore::group_alive(pgid)
+        {
+            return Err(old_group_runs(pgid));
         }
+        record.pgid = None;
         self.gate(record.group.as_deref(), None)?;
         if let Some(conversation) = &record.conversation {
             self.check_conversation_free(record.harness, &conversation.id, Some(&record))?;
@@ -559,10 +591,8 @@ impl Host {
         let _guard = self.writer.lock().await;
         if !self.skew.load(std::sync::atomic::Ordering::SeqCst) {
             // A server this build can drive gets one last capture first.
-            if let Ok(mux) = Rmux::connect(&self.paths.mux_sock()).await
-                && let Ok(records) = crate::session::read_records(&self.paths.sessions())
-            {
-                for record in &records {
+            if let Ok(mux) = Rmux::connect(&self.paths.mux_sock()).await {
+                for record in &self.background_records() {
                     self.capture_one(&mux, record).await;
                 }
             }
@@ -613,9 +643,7 @@ impl Host {
                 return;
             }
         };
-        let Ok(records) = crate::session::read_records(&self.paths.sessions()) else {
-            return;
-        };
+        let records = self.background_records();
         let enabled = self.config.restore();
         let due = |id: &str| {
             self.attempted.lock().is_ok_and(|attempted| {
@@ -675,10 +703,7 @@ impl Host {
         let Ok(mux) = Rmux::connect(&self.paths.mux_sock()).await else {
             return;
         };
-        let Ok(records) = crate::session::read_records(&self.paths.sessions()) else {
-            return;
-        };
-        for record in &records {
+        for record in &self.background_records() {
             self.capture_one(&mux, record).await;
         }
     }
@@ -686,7 +711,8 @@ impl Host {
     /// Delete ended sessions 30 days after they ended. Called under the
     /// writer lock.
     pub(super) fn prune_ended(&self) {
-        for id in crate::restore::prune(&self.paths, std::time::SystemTime::now()) {
+        let records = self.background_records();
+        for id in crate::restore::prune(&self.paths, records, std::time::SystemTime::now()) {
             eprintln!("kersh host: removed session {id}, ended more than 30 days ago");
         }
     }
