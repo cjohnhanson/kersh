@@ -24,7 +24,7 @@ transitions:
       # The same refused call on every one of many turns.
       call='{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}}'
       script="[$call,$call,$call,$call,$call,$call]"
-      OUT=$(KERSH_GAFF="$T/gaff" KERSH_FAKE_SCRIPT="$script" \
+      OUT=$(KERSH_GAFF="$T/gaff" FAKE_MODEL_SCRIPT="$script" \
         kersh run reviewer --root "$root" "review" 2>&1)
       code=$?
 

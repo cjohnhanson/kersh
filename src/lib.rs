@@ -26,6 +26,7 @@ pub mod guard;
 pub mod harness;
 pub mod hook;
 pub mod host;
+pub mod jsonl;
 pub mod login_env;
 pub mod memories;
 pub mod model;

@@ -41,13 +41,18 @@ pub enum RunError {
 /// When `gaff` is set, the run is governed: a rig hook calls `gaff hook`
 /// at each tool call and at each stop, so the profile's guards and stop
 /// rule apply. The caller has already run the session-start probe.
+///
+/// When `stream` is set, each turn, tool call, tool result, and assistant
+/// text is written to it as it happens (`--output jsonl`).
 pub async fn run(
     agent: &Agent,
     root: Root,
     system: String,
     first_turn: String,
     gaff: Option<crate::gaff::Gaff>,
+    stream: Option<crate::jsonl::Stream>,
 ) -> Result<String, RunError> {
+    let hooks = Hooks { gaff, stream };
     let root = Arc::new(root);
     let per_call = agent.meta.timeout.0;
     // The whole run is bounded by the per-call deadline times the turn cap,
@@ -86,7 +91,7 @@ pub async fn run(
                     &system,
                     &root,
                     agent.meta.max_turns,
-                    gaff,
+                    hooks,
                 );
                 drive(built, first_turn).await
             }
@@ -102,7 +107,7 @@ pub async fn run(
                     &system,
                     &root,
                     agent.meta.max_turns,
-                    gaff,
+                    hooks,
                 );
                 drive(built, first_turn).await
             }
@@ -119,7 +124,7 @@ pub async fn run(
                     &system,
                     &root,
                     agent.meta.max_turns,
-                    gaff,
+                    hooks,
                 );
                 drive(built, first_turn).await
             }
@@ -135,20 +140,32 @@ pub async fn run(
     outcome
 }
 
-/// Add the bash tool, the preamble, the turn cap, and the gaff hook to
-/// any provider's agent builder, then build it.
+/// The hooks a run carries: gaff's governance, and the `--output jsonl`
+/// observer.
+struct Hooks {
+    gaff: Option<crate::gaff::Gaff>,
+    stream: Option<crate::jsonl::Stream>,
+}
+
+/// Add the bash tool, the preamble, the turn cap, and the hooks to any
+/// provider's agent builder, then build it. The observer comes first, so
+/// it sees each tool call before gaff refuses it.
 fn configure<M: CompletionModel + 'static>(
     builder: AgentBuilder<M>,
     system: &str,
     root: &Arc<Root>,
     max_turns: usize,
-    gaff: Option<crate::gaff::Gaff>,
+    hooks: Hooks,
 ) -> rig::agent::Agent<M> {
     let builder = builder
         .preamble(system)
         .tool(Bash(Arc::clone(root)))
         .default_max_turns(max_turns);
-    let builder = match gaff {
+    let builder = match hooks.stream {
+        Some(stream) => builder.add_hook(crate::jsonl::Observer::new(stream)),
+        None => builder,
+    };
+    let builder = match hooks.gaff {
         Some(gaff) => builder.add_hook(crate::hook::GaffHook::new(gaff)),
         None => builder,
     };
@@ -287,6 +304,7 @@ mod tests {
             "sys".into(),
             "hi".into(),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -310,6 +328,7 @@ mod tests {
             root,
             "sys".into(),
             "hi".into(),
+            None,
             None,
         )
         .await

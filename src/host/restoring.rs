@@ -190,7 +190,7 @@ impl Host {
 }
 
 /// The argv the held command would run, for the pane to show.
-fn held_argv(record: &Record, ret: HeldRun) -> Vec<String> {
+fn held_argv(record: &Record, ret: HeldRun, entry: &[String]) -> Vec<String> {
     let system_text = record
         .system_prompt
         .as_ref()
@@ -220,16 +220,19 @@ fn held_argv(record: &Record, ret: HeldRun) -> Vec<String> {
         prompt_arg: (record.mode == Mode::Interactive)
             .then_some(prompt)
             .flatten(),
+        rig: super::rig_run(record, entry),
     })
 }
 
 /// The text of a held pane: why, what RET runs, and the commands.
-fn hold_message(record: &Record, why: &str, ret: Option<HeldRun>) -> String {
+fn hold_message(record: &Record, why: &str, ret: Option<HeldRun>, entry: &[String]) -> String {
     let id = &record.id;
     let mut text = format!("[kersh] held: {why}.\n");
     if let Some(ret) = ret {
-        let command = shown_command(&held_argv(record, ret));
+        let command = shown_command(&held_argv(record, ret, entry));
         let what = match (ret, record.mode) {
+            // A rig run keeps no conversation: RET runs it again.
+            (HeldRun::Fresh, _) if record.harness == Harness::Rig => "RET runs it again".to_owned(),
             (HeldRun::Fresh, Mode::Headless) => "RET runs the first prompt again".to_owned(),
             (HeldRun::Fresh, Mode::Interactive) => {
                 "RET runs the first prompt again in a new conversation".to_owned()
@@ -244,6 +247,9 @@ fn hold_message(record: &Record, why: &str, ret: Option<HeldRun>) -> String {
         let _ = writeln!(text, "[kersh] {what}: {command}{stdin}");
     }
     let _ = match record.mode {
+        Mode::Headless if record.harness == Harness::Rig => {
+            writeln!(text, "[kersh] `kersh stop {id}` ends it.")
+        }
         Mode::Headless => writeln!(
             text,
             "[kersh] `kersh resume {id} --prompt-file -` continues it with a new prompt; \
@@ -413,7 +419,7 @@ impl Host {
                 // person survives the server too.
                 let why = record.reason.clone().unwrap_or_else(|| "held".to_owned());
                 let ret = record.held_run;
-                let message = hold_message(&record, &why, ret);
+                let message = hold_message(&record, &why, ret, &self.entry);
                 let at = crate::util::now_rfc3339();
                 let line = format!("held at {at} after {after}: {why}");
                 record.restores.push(Restore {
@@ -508,7 +514,10 @@ impl Host {
     ) -> Result<(), SessionError> {
         let old_alive = self.wait_old_group(record).await;
         let mut build_change = None;
-        let build = crate::harness::recheck(record.harness, &record.build, &self.login_env);
+        let build = match record.harness {
+            Harness::Rig => Ok(crate::harness::rig_build(&self.entry)),
+            other => crate::harness::recheck(other, &record.build, &self.login_env),
+        };
         let build_error = match build {
             Ok(build) => {
                 if build != record.build {
@@ -551,7 +560,7 @@ impl Host {
                 )
             }
             Plan::Hold { why, ret } => {
-                let message = hold_message(record, &why, ret);
+                let message = hold_message(record, &why, ret, &self.entry);
                 record.reason = Some(why.clone());
                 (
                     RestoreOutcome::Held,

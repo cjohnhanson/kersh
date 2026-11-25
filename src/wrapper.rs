@@ -284,9 +284,13 @@ impl Wrapper {
             .as_ref()
             .map_or("held", |exit| exit.reason.as_str());
         let id = &self.launch.id;
-        say(&format!(
-            "\r\n[kersh] held: {reason}. `kersh resume {id}` continues it; `kersh stop {id}` ends it.\r\n"
-        ));
+        // A rig run keeps no conversation, so only a stop applies.
+        let next = if self.launch.harness == Harness::Rig {
+            format!("`kersh stop {id}` ends it.")
+        } else {
+            format!("`kersh resume {id}` continues it; `kersh stop {id}` ends it.")
+        };
+        say(&format!("\r\n[kersh] held: {reason}. {next}\r\n"));
         let (Ok(mut term), Ok(mut hup)) = (
             signal(SignalKind::terminate()),
             signal(SignalKind::hangup()),

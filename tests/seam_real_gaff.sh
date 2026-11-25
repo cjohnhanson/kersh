@@ -67,7 +67,7 @@ printf 'TOPSECRET-42\n' >"$T/root/notes/secret.txt"
 printf 'hello world\n' >"$T/root/notes/public.txt"
 
 # Refuse: a guarded path never reaches the model.
-export KERSH_FAKE_SCRIPT='[{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}},{"kind":"echo_tool_result"}]'
+export FAKE_MODEL_SCRIPT='[{"kind":"tool","name":"bash","args":{"command":"cat notes/secret.txt"}},{"kind":"echo_tool_result"}]'
 OUT=$("$KERSH" run reviewer --root "$T/root" "review" 2>&1) || {
 	echo "FAIL: a guarded run must not error: $OUT"
 	exit 1
@@ -87,7 +87,7 @@ case "$OUT" in
 esac
 
 # Allow: an unguarded path runs and its content reaches the model.
-export KERSH_FAKE_SCRIPT='[{"kind":"tool","name":"bash","args":{"command":"cat notes/public.txt"}},{"kind":"echo_tool_result"}]'
+export FAKE_MODEL_SCRIPT='[{"kind":"tool","name":"bash","args":{"command":"cat notes/public.txt"}},{"kind":"echo_tool_result"}]'
 OUT=$("$KERSH" run reviewer --root "$T/root" "review" 2>&1) || {
 	echo "FAIL: an allowed run must not error: $OUT"
 	exit 1

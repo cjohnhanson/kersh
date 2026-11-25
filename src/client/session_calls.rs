@@ -205,6 +205,14 @@ impl Client {
         let runtimes = crate::runtime::load_runtimes(&self.paths).map_err(SessionError::usage)?;
         let resolved = crate::runtime::resolve(agent.as_ref(), &runtimes, request)
             .map_err(SessionError::usage)?;
+        if resolved.settings.harness == crate::session::Harness::Rig
+            && let Some(agent) = agent.as_ref().filter(|agent| agent.meta.model.is_empty())
+        {
+            return Err(SessionError::usage(format!(
+                "`{}` names no model, so rig cannot run it; give it a `model` or another harness",
+                agent.meta.name
+            )));
+        }
 
         let mut system = String::new();
         if let Some(agent) = &agent {

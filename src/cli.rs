@@ -25,11 +25,11 @@ Commands:
   kersh show <name> [--json]
   kersh check [--json]
   kersh render <name> [--context-file <path|->] [--json] [prompt]
-  kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]
+  kersh run <name> [--context-file <path|->] [--root <dir>] [--output jsonl] [prompt]
   kersh docs
   kersh --version
 Agent-file commands take --root <dir>. --json prints one JSON object per line.
-Sessions (Claude Code and Codex, hosted in a terminal session):
+Sessions (rig, Claude Code, and Codex, hosted in a terminal session):
   kersh start [agent] [--runtime R] [--harness H] [--mode M] [--prompt-file <path|->]
   kersh ps [--follow] [--json]
   kersh attach <id>          (C-] leaves it running)
@@ -105,19 +105,7 @@ enum Command {
         prompt: Option<String>,
     },
     /// Run an agent and print its final answer.
-    Run {
-        /// The agent to run.
-        name: String,
-        /// Read context from this file, or from standard input for `-`.
-        #[arg(long, value_name = "PATH|-")]
-        context_file: Option<PathBuf>,
-        /// Use this kersh root, and run the agent's commands in it.
-        /// The default is the current directory.
-        #[arg(long, value_name = "DIR")]
-        root: Option<PathBuf>,
-        /// The prompt. Put `--` before a prompt that starts with a dash.
-        prompt: Option<String>,
-    },
+    Run(Box<RunArgs>),
     /// Print the kersh manual.
     Docs,
     /// Print a short primer for an agent's context.
@@ -264,6 +252,46 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
+struct RunArgs {
+    /// The agent to run.
+    name: String,
+    /// Read context from this file, or from standard input for `-`.
+    #[arg(long, value_name = "PATH|-")]
+    context_file: Option<PathBuf>,
+    /// Read the prompt from this file, or from standard input for `-`.
+    #[arg(long, value_name = "PATH|-", conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
+    /// Use this kersh root, and run the agent's commands in it.
+    /// The default is the current directory.
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
+    /// `text` prints the final answer only. `jsonl` prints one JSON event
+    /// per line for each turn, tool call, and tool result, and the result
+    /// with the final text last.
+    #[arg(long, value_name = "FORMAT", value_enum, default_value_t = RunOutput::Text)]
+    output: RunOutput,
+    /// The agent file a session runs, instead of a store lookup.
+    #[arg(long, value_name = "PATH", hide = true)]
+    agent_file: Option<PathBuf>,
+    /// The system prompt a session composed, instead of the agent's
+    /// body and skill.
+    #[arg(long, value_name = "PATH", hide = true)]
+    system_file: Option<PathBuf>,
+    /// The gaff profile a session resolved, over the agent's own.
+    #[arg(long, value_name = "PROFILE", hide = true)]
+    profile: Option<String>,
+    /// The prompt. Put `--` before a prompt that starts with a dash.
+    prompt: Option<String>,
+}
+
+/// What `kersh run` prints on standard output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RunOutput {
+    Text,
+    Jsonl,
+}
+
+#[derive(Debug, Args)]
 struct StartArgs {
     /// The agent file to start. Without one, --harness or --runtime is
     /// required.
@@ -271,7 +299,7 @@ struct StartArgs {
     /// A runtime from runtimes.yml, over the agent's own.
     #[arg(long, value_name = "NAME")]
     runtime: Option<String>,
-    /// claude-code or codex.
+    /// rig, claude-code, or codex.
     #[arg(long, value_name = "HARNESS")]
     harness: Option<Harness>,
     /// headless or interactive.
@@ -433,17 +461,7 @@ fn dispatch(command: Command) -> ExitCode {
                 json.json,
             )
         }),
-        Command::Run {
-            name,
-            context_file,
-            root,
-            prompt,
-        } => run_agent(
-            &name,
-            context_file.as_deref(),
-            root,
-            prompt.as_deref().unwrap_or_default(),
-        ),
+        Command::Run(args) => run_agent(&args),
         Command::Docs => {
             print!("{DOCS}");
             ExitCode::SUCCESS
@@ -568,7 +586,7 @@ fn command_into(command: Command) -> Option<crate::cli_sessions::SessionCmd> {
         | Command::Show { .. }
         | Command::Check { .. }
         | Command::Render { .. }
-        | Command::Run { .. }
+        | Command::Run(_)
         | Command::Docs
         | Command::Prime => return None,
     })
@@ -801,52 +819,113 @@ fn render(
 /// `kersh run <name> [--context-file <path|->] [--root <dir>] [prompt]`.
 ///
 /// The agent runs through rig against the provider its `model` names.
-/// The final text goes to standard output and nothing else does, because
-/// gaff reads a hook agent's verdict from that stream. The tools are
-/// confined to the current directory, or `--root`.
-fn run_agent(
-    name: &str,
-    context_file: Option<&Path>,
-    root: Option<PathBuf>,
-    prompt: &str,
-) -> ExitCode {
-    let client = match client(root.as_deref()) {
-        Ok(client) => client,
-        Err(error) => return fail(&error),
+/// Without `--output jsonl`, the final text goes to standard output and
+/// nothing else does, because gaff reads a hook agent's verdict from that
+/// stream. With it, each event is one JSON line and the result, with the
+/// final text, is the last. The tools are confined to the current
+/// directory, or `--root`.
+fn run_agent(args: &RunArgs) -> ExitCode {
+    let stream = (args.output == RunOutput::Jsonl).then(crate::jsonl::Stream::stdout);
+    match run_inner(args, stream.as_ref()) {
+        Ok(answer) => {
+            match &stream {
+                Some(stream) => stream.result(Ok(&answer)),
+                None => println!("{answer}"),
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            if let Some(stream) = &stream {
+                stream.result(Err(&message));
+            }
+            fail(&message)
+        }
+    }
+}
+
+/// Load the agent a run names: the session's file, or the stores' match.
+fn load_run_agent(args: &RunArgs) -> Result<crate::agent::Agent, String> {
+    let name = &args.name;
+    let Some(path) = &args.agent_file else {
+        let agent = client(args.root.as_deref())?
+            .stores()
+            .load(name)
+            .map_err(|error| error.to_string())?;
+        check_rig_harness(&agent)?;
+        return Ok(agent);
     };
-    let agent = match client.stores().load(name) {
-        Ok(agent) => agent,
-        Err(error) => return fail(&error.to_string()),
+    // A session's settings already chose rig; its file is read as is.
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?;
+    crate::agent::Agent::parse(&text, path, name).map_err(|error| error.to_string())
+}
+
+/// Refuse an agent whose runtime names another harness: `kersh run` runs
+/// rig in this process, and `kersh start` hosts the others.
+fn check_rig_harness(agent: &crate::agent::Agent) -> Result<(), String> {
+    let Some(runtime) = &agent.meta.runtime else {
+        return Ok(());
     };
+    let name = &agent.meta.name;
+    let runtimes = crate::runtime::load_runtimes(&crate::paths::Paths::discover())?;
+    let resolved = crate::runtime::resolve(
+        Some(agent),
+        &runtimes,
+        &crate::session::StartRequest::default(),
+    )?;
+    let harness = resolved.settings.harness;
+    if harness != Harness::Rig {
+        return Err(format!(
+            "`{name}` runs on the {harness} harness (runtime `{runtime}`), not rig; \
+             `kersh start {name}` runs it in a session"
+        ));
+    }
+    Ok(())
+}
+
+fn run_inner(args: &RunArgs, stream: Option<&crate::jsonl::Stream>) -> Result<String, String> {
+    let name = args.name.as_str();
+    let mut agent = load_run_agent(args)?;
     if agent.meta.model.is_empty() {
-        return fail(&format!(
+        return Err(format!(
             "`{name}` names no model, so rig cannot run it; `kersh start {name}` runs it in a session"
         ));
     }
-    let context = match context_file.map(read_context).transpose() {
-        Ok(context) => context,
-        Err(error) => return fail(&error),
+    if let Some(profile) = &args.profile {
+        agent.meta.profile = Some(profile.clone());
+    }
+    let stdin_twice = [&args.context_file, &args.prompt_file]
+        .iter()
+        .all(|path| path.as_deref() == Some(Path::new("-")));
+    if stdin_twice {
+        return Err("--context-file and --prompt-file cannot both read standard input".to_owned());
+    }
+    let context = args.context_file.as_deref().map(read_context).transpose()?;
+    let prompt = match &args.prompt_file {
+        Some(path) => read_context(path)?,
+        None => args.prompt.clone().unwrap_or_default(),
     };
+    let prompt = prompt.as_str();
     // An agent with a profile takes its situation from gaff's session-start
     // injection, so it needs no prompt on the command line. Without a
     // profile, the caller supplies the situation as a prompt or a context
     // file, or there is nothing for the agent to act on.
     if prompt.trim().is_empty() && context.is_none() && agent.meta.profile.is_none() {
-        return fail("give a prompt, or context with --context-file");
+        return Err("give a prompt, or context with --context-file".to_owned());
     }
 
-    let root_dir = root
+    let root_dir = args
+        .root
+        .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let root = match crate::tools::Root::new(&root_dir) {
-        Ok(root) => root,
-        Err(error) => return fail(&error.to_string()),
-    };
+    let root = crate::tools::Root::new(&root_dir).map_err(|error| error.to_string())?;
 
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => return fail(&format!("cannot start the async runtime: {error}")),
-    };
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| format!("cannot start the async runtime: {error}"))?;
+    if let Some(stream) = stream {
+        stream.init(name, &agent.meta.model);
+    }
 
     // Governance is opt-in: an agent with a `profile` runs under gaff. The
     // session-start probe both fetches the injected context and proves
@@ -857,10 +936,10 @@ fn run_agent(
         Some(gaff) => match runtime.block_on(gaff.hook(crate::gaff::SESSION_START, None)) {
             crate::gaff::Outcome::Allow(context) => Some(context),
             crate::gaff::Outcome::Refuse(reason) => {
-                return fail(&format!("gaff refused the session start: {reason}"));
+                return Err(format!("gaff refused the session start: {reason}"));
             }
             crate::gaff::Outcome::Failed(message) => {
-                return fail(&format!(
+                return Err(format!(
                     "gaff governance is on for `{name}`, but gaff could not start: {message}"
                 ));
             }
@@ -870,22 +949,33 @@ fn run_agent(
 
     // The agent's almanac skill is its method, resolved before the run. A
     // named skill that cannot resolve aborts, so a run never silently drops
-    // the agent's method.
-    let skill = match crate::client::skill_body(&agent) {
-        Ok(skill) => skill,
-        Err(error) => return fail(&error),
+    // the agent's method. A session composed its system prompt at start,
+    // with any skill or instructions it was given, and passes that file.
+    let system = match &args.system_file {
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read `{}`: {error}", path.display()))?,
+        ),
+        None => None,
+    };
+    let skill = match system {
+        Some(_) => None,
+        None => crate::client::skill_body(&agent)?,
     };
 
     // gaff's session-start context and any --context-file are both
     // untrusted; the compose step wraps them together, gaff first.
     let combined = combine_context(gaff_context, context);
-    let composed = crate::compose::compose(
+    let mut composed = crate::compose::compose(
         &agent,
         skill.as_deref(),
         combined.as_deref(),
         prompt,
         &crate::util::nonce(),
     );
+    if let Some(system) = system {
+        composed.system = system;
+    }
 
     // A profiled agent takes its whole situation from gaff's session-start
     // injection. When that injection is empty and no prompt was given, the
@@ -893,26 +983,18 @@ fn run_agent(
     // would report only an opaque empty-transcript error, so fail here with
     // the cause. The earlier guard cannot catch this: gaff answers the
     // injection at run time, not before.
-    if let Err(message) =
-        situation_present(&composed.first_turn, agent.meta.profile.as_deref(), name)
-    {
-        return fail(&message);
-    }
+    situation_present(&composed.first_turn, agent.meta.profile.as_deref(), name)?;
 
-    let outcome = runtime.block_on(crate::model::run(
-        &agent,
-        root,
-        composed.system,
-        composed.first_turn,
-        gaff,
-    ));
-    match outcome {
-        Ok(answer) => {
-            println!("{answer}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => fail(&error.to_string()),
-    }
+    runtime
+        .block_on(crate::model::run(
+            &agent,
+            root,
+            composed.system,
+            composed.first_turn,
+            gaff,
+            stream.cloned(),
+        ))
+        .map_err(|error| error.to_string())
 }
 
 /// Join gaff's session-start context and the caller's context, gaff
@@ -1073,31 +1155,26 @@ mod tests {
 
     #[test]
     fn a_double_dash_lets_a_prompt_start_with_a_dash() {
-        let Command::Run {
-            name, root, prompt, ..
-        } = parse(&["run", "reviewer", "--root", "/r", "--", "-fix the tests"])
+        let Command::Run(args) =
+            parse(&["run", "reviewer", "--root", "/r", "--", "-fix the tests"])
         else {
             panic!("not a run");
         };
-        assert_eq!(name, "reviewer");
-        assert_eq!(root, Some(PathBuf::from("/r")));
-        assert_eq!(prompt.as_deref(), Some("-fix the tests"));
+        assert_eq!(args.name, "reviewer");
+        assert_eq!(args.root, Some(PathBuf::from("/r")));
+        assert_eq!(args.prompt.as_deref(), Some("-fix the tests"));
+        assert_eq!(args.output, RunOutput::Text, "text is the default");
     }
 
     #[test]
     fn flags_may_follow_the_name_and_the_prompt() {
-        let Command::Run {
-            name,
-            context_file,
-            prompt,
-            ..
-        } = parse(&["run", "reviewer", "review it", "--context-file", "-"])
+        let Command::Run(args) = parse(&["run", "reviewer", "review it", "--context-file", "-"])
         else {
             panic!("not a run");
         };
-        assert_eq!(name, "reviewer");
-        assert_eq!(context_file, Some(PathBuf::from("-")));
-        assert_eq!(prompt.as_deref(), Some("review it"));
+        assert_eq!(args.name, "reviewer");
+        assert_eq!(args.context_file, Some(PathBuf::from("-")));
+        assert_eq!(args.prompt.as_deref(), Some("review it"));
     }
 
     #[test]

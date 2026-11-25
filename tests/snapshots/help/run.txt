@@ -8,5 +8,7 @@ Arguments:
 
 Options:
       --context-file <PATH|->  Read context from this file, or from standard input for `-`
+      --prompt-file <PATH|->   Read the prompt from this file, or from standard input for `-`
       --root <DIR>             Use this kersh root, and run the agent's commands in it. The default is the current directory
+      --output <FORMAT>        `text` prints the final answer only. `jsonl` prints one JSON event per line for each turn, tool call, and tool result, and the result with the final text last [default: text] [possible values: text, jsonl]
   -h, --help                   Print help

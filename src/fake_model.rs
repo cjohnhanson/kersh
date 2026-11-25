@@ -3,7 +3,7 @@
 //! This module exists behind the `fake-model` feature, off by default, so
 //! the shipped binary carries no fake provider. A test build turns it on,
 //! and `model: fake/scripted` selects it. The script is a JSON array in
-//! `KERSH_FAKE_SCRIPT`, one entry per model turn. It lets a missouri test
+//! `FAKE_MODEL_SCRIPT`, one entry per model turn. It lets a missouri test
 //! drive a whole governed run with no network: the fake model emits a
 //! scripted tool call, the real gaff hook runs, and the run ends on a
 //! scripted text turn.
@@ -51,14 +51,14 @@ pub struct FakeModel {
 }
 
 impl FakeModel {
-    /// Build a fake model from the JSON script in `KERSH_FAKE_SCRIPT`.
+    /// Build a fake model from the JSON script in `FAKE_MODEL_SCRIPT`.
     ///
     /// # Errors
     /// Returns the reason when the variable is unset or is not a JSON array
     /// of turns.
     pub fn from_env() -> Result<Self, String> {
-        let raw = std::env::var("KERSH_FAKE_SCRIPT")
-            .map_err(|_| "the fake model needs a script in KERSH_FAKE_SCRIPT".to_owned())?;
+        let raw = std::env::var("FAKE_MODEL_SCRIPT")
+            .map_err(|_| "the fake model needs a script in FAKE_MODEL_SCRIPT".to_owned())?;
         Self::from_json(&raw)
     }
 
@@ -68,7 +68,7 @@ impl FakeModel {
     /// Returns the reason when the text is not a JSON array of turns.
     fn from_json(raw: &str) -> Result<Self, String> {
         let script: Vec<Turn> = serde_json::from_str(raw)
-            .map_err(|error| format!("KERSH_FAKE_SCRIPT is not a valid script: {error}"))?;
+            .map_err(|error| format!("FAKE_MODEL_SCRIPT is not a valid script: {error}"))?;
         Ok(Self { script })
     }
 

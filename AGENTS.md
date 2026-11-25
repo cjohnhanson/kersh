@@ -48,7 +48,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/cli.rs` | `kersh::cli::main`, the whole command surface (clap) |
 | `src/client.rs` | `kersh::Client`, the library API; every method has a command with the same JSON |
 | `src/agent.rs`, `src/store.rs` | agent files and their roots |
-| `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs` | rig, the built-in harness, and its gaff governance |
+| `src/model.rs`, `src/tools.rs`, `src/hook.rs`, `src/gaff.rs`, `src/jsonl.rs` | rig, the built-in harness, its gaff governance, and the `kersh run --output jsonl` stream a rig session reads |
 | `src/session.rs`, `src/events.rs`, `src/proto.rs` | the session record, the events file, and the `host.sock` protocol, each with a schema number |
 | `src/host.rs`, `src/wrapper.rs`, `src/mux.rs`, `src/service.rs` | the host (single writer), the pane wrapper and its exit cases, the rmux server and attach client, and how the host and server start |
 | `src/host/restoring.rs`, `src/restore.rs` | restore of lost sessions, held panes and RET, screen captures, `restart --mux`; the name-only transcript and rollout checks and the 30-day prune |
@@ -57,6 +57,7 @@ Leave `.agents/skills` as almanac vendors it; `almanac sync --check` reports dri
 | `src/setup.rs`, `src/memories.rs` | `kersh setup` and `kersh memories` |
 | `tests/sessions.rs`, `tests/fixtures/` | sessions end to end: a real session server on a temp socket, fake `claude` and `codex` scripts, canned streams |
 | `tests/restore.rs`, `tests/support/` | restore end to end: `kill -9` of the server, one vanished session, `restart --mux`, on the same kind of harness |
+| `tests/rig.rs` | rig end to end through the fake model: `--output jsonl`, the refusal of another harness, rig sessions, their limits and restore |
 | `tests/help.rs`, `tests/snapshots/help/` | `--help` snapshots for every command |
 | `tests/missouri/` | state-transition suites; `gaff-runner` holds gaff's hook-agent contract |
 | `tests/probes/` | probes of real harnesses; they need network and a signed-in harness, so no gate runs them |
