@@ -266,10 +266,11 @@ struct RunArgs {
     #[arg(long, value_name = "DIR")]
     root: Option<PathBuf>,
     /// `text` prints the final answer only. `jsonl` prints one JSON event
-    /// per line: `init` with the agent and model first, then `turn` for
-    /// each model turn, `text` for its text, `tool` for each tool call,
+    /// per line: `init` with the agent and model, then `turn` for each
+    /// model turn, `text` for its text, `tool` for each tool call,
     /// `tool_result` with its status (`success`, `error`, or `refused`),
-    /// and `result` with the final text last.
+    /// and `result` with the final text. `result` is always last; a run
+    /// refused before it starts writes only `result`.
     #[arg(long, value_name = "FORMAT", value_enum, default_value_t = RunOutput::Text)]
     output: RunOutput,
     /// The agent file a session runs, instead of a store lookup.
@@ -918,7 +919,10 @@ fn run_inner(args: &RunArgs, stream: Option<&crate::jsonl::Stream>) -> Result<St
     // profile, the caller supplies the situation as a prompt or a context
     // file, or there is nothing for the agent to act on.
     if prompt.trim().is_empty() && context.is_none() && agent.meta.profile.is_none() {
-        return Err("give a prompt, or context with --context-file".to_owned());
+        return Err(
+            "give a prompt (as an argument or with --prompt-file), or context with --context-file"
+                .to_owned(),
+        );
     }
 
     let root_dir = args
@@ -1031,7 +1035,10 @@ fn situation_present(first_turn: &str, profile: Option<&str>, name: &str) -> Res
             "the `{profile}` profile injected no context and no prompt was given, \
              so `{name}` has nothing to act on (is anything staged?)"
         ),
-        None => "give a prompt, or context with --context-file".to_owned(),
+        None => {
+            "give a prompt (as an argument or with --prompt-file), or context with --context-file"
+                .to_owned()
+        }
     })
 }
 
@@ -1088,6 +1095,7 @@ mod tests {
     fn an_empty_turn_without_a_profile_asks_for_a_prompt() {
         let error = situation_present("", None, "explain").unwrap_err();
         assert!(error.contains("give a prompt"), "{error}");
+        assert!(error.contains("--prompt-file"), "{error}");
     }
 
     #[test]

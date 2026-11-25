@@ -10,5 +10,5 @@ Options:
       --context-file <PATH|->  Read context from this file, or from standard input for `-`
       --prompt-file <PATH|->   Read the prompt from this file, or from standard input for `-`
       --root <DIR>             Use this kersh root, and run the agent's commands in it. The default is the current directory
-      --output <FORMAT>        `text` prints the final answer only. `jsonl` prints one JSON event per line: `init` with the agent and model first, then `turn` for each model turn, `text` for its text, `tool` for each tool call, `tool_result` with its status (`success`, `error`, or `refused`), and `result` with the final text last [default: text] [possible values: text, jsonl]
+      --output <FORMAT>        `text` prints the final answer only. `jsonl` prints one JSON event per line: `init` with the agent and model, then `turn` for each model turn, `text` for its text, `tool` for each tool call, `tool_result` with its status (`success`, `error`, or `refused`), and `result` with the final text. `result` is always last; a run refused before it starts writes only `result` [default: text] [possible values: text, jsonl]
   -h, --help                   Print help

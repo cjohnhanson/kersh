@@ -345,6 +345,7 @@ fn a_failing_rig_run_holds() {
     assert_eq!(result["is_error"], true);
     let text = env.wait_screen(&id, "held");
     assert!(text.contains(&format!("kersh stop {id}")), "{text}");
+    assert!(!text.contains("kersh resume"), "{text}");
 }
 
 #[test]
