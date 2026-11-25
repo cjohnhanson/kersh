@@ -159,22 +159,33 @@ pub fn safe_model(model: &str) -> bool {
         })
 }
 
-/// Variables a runtime may not set: those kersh sets itself, and those
-/// that move a harness to other settings than the ones its profile check
-/// read, off gaff's hooks.
-pub const RESERVED_ENV: &[&str] = &[
-    "KERSH_SESSION",
-    "KERSH_MEMORY_ROOT",
-    "GAFF_PROFILE",
-    "COLORTERM",
-    "COLORFGBG",
-    "HOME",
-    "XDG_CONFIG_HOME",
-    "CLAUDE_CONFIG_DIR",
-    "CODEX_HOME",
+/// Prefixes of the variable families a runtime may not set: the harnesses'
+/// own settings (`CLAUDE_`, `CODEX_`, `ANTHROPIC_`, `OPENAI_`), gaff's and
+/// kersh's (`GAFF_`, `KERSH_`), where tools find their configuration
+/// (`XDG_`), and the dynamic loader's (`LD_`, `DYLD_`).
+pub const RESERVED_ENV_PREFIXES: &[&str] = &[
+    "CLAUDE_",
+    "CODEX_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GAFF_",
+    "KERSH_",
+    "XDG_",
+    "LD_",
+    "DYLD_",
 ];
 
-/// Refuse a session variable a runtime may not set.
+/// Single names a runtime may not set: where programs and their
+/// configuration are found, and the terminal colours kersh sets for every
+/// pane.
+pub const RESERVED_ENV_NAMES: &[&str] = &["HOME", "PATH", "SHELL", "COLORTERM", "COLORFGBG"];
+
+/// Refuse a session variable a runtime may not set. The rule is by
+/// family, so a variable a harness adds later is refused with the rest:
+/// any name that starts with one of [`RESERVED_ENV_PREFIXES`], and each of
+/// [`RESERVED_ENV_NAMES`]. kersh and the login environment set these, and
+/// any of them can move a harness to other settings than the ones its
+/// profile check read, off gaff's hooks.
 pub fn check_env_key(key: &str) -> Result<(), String> {
     let ok = !key.is_empty()
         && !key.starts_with(|c: char| c.is_ascii_digit())
@@ -182,9 +193,13 @@ pub fn check_env_key(key: &str) -> Result<(), String> {
     if !ok {
         return Err(format!("`{key}` is not a variable name"));
     }
-    if RESERVED_ENV.contains(&key) {
+    if RESERVED_ENV_NAMES.contains(&key)
+        || RESERVED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+    {
         return Err(format!(
-            "`{key}` comes from kersh or the login environment, not from a runtime"
+            "remove {key} from the runtime's env; kersh sets the harness and tool variables itself"
         ));
     }
     Ok(())
@@ -478,22 +493,55 @@ mod tests {
         assert!(unknown.is_err(), "an unknown field is refused");
     }
 
+    /// One name from each family a runtime may not set, and each exact
+    /// name.
+    const REFUSED: &[&str] = &[
+        "CLAUDE_CODE_SIMPLE",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "GAFF_HANDLERS",
+        "GAFF_PROFILE",
+        "KERSH_SESSION",
+        "XDG_CONFIG_HOME",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "HOME",
+        "PATH",
+        "SHELL",
+    ];
+
     #[test]
     fn a_runtime_may_not_move_the_harness_off_its_hooks() {
-        for key in [
-            "CLAUDE_CONFIG_DIR",
-            "CODEX_HOME",
-            "HOME",
-            "XDG_CONFIG_HOME",
-            "KERSH_SESSION",
-            "GAFF_PROFILE",
-        ] {
+        for key in REFUSED {
             let runtime = Runtime {
-                env: BTreeMap::from([(key.to_owned(), "/elsewhere".to_owned())]),
+                env: BTreeMap::from([((*key).to_owned(), "/elsewhere".to_owned())]),
                 ..Runtime::default()
             };
             let error = validate("w", &runtime).unwrap_err();
+            assert!(
+                error.contains(&format!("remove {key} from the runtime's env")),
+                "{key}: {error}"
+            );
+            let all = BTreeMap::from([("w".to_owned(), runtime)]);
+            let request = StartRequest {
+                runtime: Some("w".to_owned()),
+                ..StartRequest::default()
+            };
+            let error = resolve(None, &all, &request).unwrap_err();
             assert!(error.contains(key), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_variable_is_a_runtime_s_to_set() {
+        for key in ["RUST_LOG", "MY_PATH", "PATHS", "HOMEBREW_NO_ANALYTICS"] {
+            let runtime = Runtime {
+                env: BTreeMap::from([(key.to_owned(), "x".to_owned())]),
+                ..Runtime::default()
+            };
+            assert_eq!(validate("w", &runtime), Ok(()), "{key}");
         }
     }
 

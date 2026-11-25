@@ -227,7 +227,9 @@ impl Env {
         self.wait(id, state, |record| record["state"] == state)
     }
 
-    /// The fake harness's files for a session: args, env, stdin.
+    /// The fake harness's files for a session's latest launch: args, env,
+    /// stdin. The latest is the newest file, since pids do not grow in
+    /// name order.
     fn fake_log(&self, id: &str, suffix: &str) -> String {
         let dir = self.home().join("fakelog");
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -241,7 +243,11 @@ impl Env {
                         name.starts_with(&format!("{id}.")) && name.ends_with(suffix)
                     })
                     .collect();
-                found.sort();
+                found.sort_by_key(|path| {
+                    std::fs::metadata(path)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                });
                 if let Some(path) = found.last()
                     && let Ok(text) = std::fs::read_to_string(path)
                     && !text.is_empty()
@@ -731,6 +737,57 @@ fn a_free_conversation_resumes_and_one_a_harness_runs_is_refused() {
 }
 
 #[test]
+fn a_running_session_restarts_while_its_own_harness_runs_the_conversation() {
+    let env = Env::new();
+    // `hold` keeps the fake running as `claude`, as a real harness does.
+    let id = env.start(&["--harness", "claude-code"], "hold");
+    let first = env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    env.fake_log(&id, ".args");
+    let output = env.kersh(&["restart", &id]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let record = env.wait(&id, "the second launch's harness", |r| {
+        r["launches"] == 2 && r["harness_pid"].is_i64()
+    });
+    assert_eq!(record["state"], "running");
+    assert_ne!(record["harness_pid"], first["harness_pid"]);
+}
+
+/// Rewrite fields of a session's record on disk, as a record left
+/// behind by a crash would read.
+fn edit_record(env: &Env, id: &str, edit: impl FnOnce(&mut Value)) {
+    let path = env.state().join("sessions").join(id).join("record.json");
+    let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut record);
+    std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn a_conversation_another_session_s_harness_runs_is_refused_on_resume() {
+    let env = Env::new();
+    let holder = env.start(&["--harness", "claude-code"], "hold");
+    let record = env.wait(&holder, "the harness pid", |r| r["harness_pid"].is_i64());
+    let uuid = record["conversation"]["id"].as_str().unwrap().to_owned();
+    env.fake_log(&holder, ".args");
+    let other = env.start(&["--harness", "claude-code"], "wait");
+    env.wait(&other, "the harness pid", |r| r["harness_pid"].is_i64());
+    assert!(env.kersh(&["stop", &other]).status.success());
+    // The holder's record no longer claims the conversation, so only its
+    // harness process can tell the resume that the conversation is taken.
+    edit_record(&env, &holder, |r| r["state"] = "ended".into());
+    edit_record(&env, &other, |r| {
+        r["conversation"]["id"] = uuid.clone().into();
+    });
+    let output = env.kersh_in(&["resume", &other, "--prompt-file", "-"], "wait");
+    edit_record(&env, &holder, |r| r["state"] = "running".into());
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("another process already runs"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn sigterm_to_a_headless_wrapper_stops_the_harness_children_too() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code", "--mode", "headless"], "spawn");
@@ -1077,14 +1134,41 @@ fn the_host_refuses_a_session_env_that_kersh_sets_itself() {
     let env = Env::new();
     let id = env.start(&["--harness", "claude-code"], "wait");
     env.wait_state(&id, "running");
-    for key in ["KERSH_SESSION", "GAFF_PROFILE", "CLAUDE_CONFIG_DIR", "HOME"] {
+    for key in [
+        "CLAUDE_CODE_SIMPLE",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "GAFF_HANDLERS",
+        "GAFF_PROFILE",
+        "KERSH_SESSION",
+        "XDG_CONFIG_HOME",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "HOME",
+        "PATH",
+        "SHELL",
+    ] {
         let request = raw_start(&env, &[], None, None, &serde_json::json!({ key: "x" }));
         let error = ask_host(&env, &request).unwrap_err();
         assert!(
-            matches!(&error, kersh::session::SessionError::Usage { message } if message.contains(key)),
+            matches!(&error, kersh::session::SessionError::Usage { message }
+                if message.contains(&format!("remove {key} from the runtime's env"))),
             "{key}: {error:?}"
         );
     }
+    let request = raw_start(
+        &env,
+        &[],
+        None,
+        None,
+        &serde_json::json!({ "RUST_LOG": "debug" }),
+    );
+    let record = ask_host(&env, &request).unwrap();
+    let id = record["id"].as_str().unwrap().to_owned();
+    env.wait(&id, "the harness pid", |r| r["harness_pid"].is_i64());
+    assert!(env.fake_log(&id, ".env").contains("RUST_LOG=debug"));
 }
 
 #[test]
@@ -1102,18 +1186,8 @@ fn a_gaff_profile_in_the_login_environment_never_reaches_an_unprofiled_session()
 }
 
 #[test]
-fn a_profile_is_checked_against_the_path_the_session_gets() {
+fn a_runtime_may_not_change_the_path_a_profile_check_reads() {
     let env = Env::new();
-    write_exe(
-        &env.bin().join("gaff"),
-        "#!/bin/sh\nif [ \"$1 $2\" = \"profile list\" ]; then printf 'worker\\tagent\\n'; fi\n",
-    );
-    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
-    std::fs::write(
-        env.home().join(".claude/settings.json"),
-        r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"gaff hook"}]}]}}"#,
-    )
-    .unwrap();
     let runtime = env.work().join("nogaff.yml");
     std::fs::write(
         &runtime,
@@ -1121,14 +1195,9 @@ fn a_profile_is_checked_against_the_path_the_session_gets() {
     )
     .unwrap();
     let output = env.kersh(&["runtime", "add", "nogaff", runtime.to_str().unwrap()]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    let output = env.kersh_in(
-        &["start", "--runtime", "nogaff", "--prompt-file", "-"],
-        "wait",
-    );
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("gaff is not on the session's PATH"),
+        stderr(&output).contains("remove PATH from the runtime's env"),
         "{}",
         stderr(&output)
     );

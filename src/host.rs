@@ -749,7 +749,7 @@ impl Host {
         };
         // Before the pane goes: a refused relaunch leaves the session as
         // it was.
-        self.check_conversation_free(record.harness, &conversation.id, Some(&record.id))?;
+        self.check_conversation_free(record.harness, &conversation.id, Some(&record))?;
         self.end_pane(mux, &record).await?;
         let launch = record.launches + 1;
         let stdin = match &prompt {
@@ -785,16 +785,18 @@ impl Host {
     }
 
     /// Refuse a conversation that another live record holds, or that a
-    /// harness process outside kersh runs. Called under the writer lock.
+    /// harness process runs other than `own`'s own launch: its wrapper,
+    /// the wrapper's descendants, and its harness's process group. Called
+    /// under the writer lock.
     fn check_conversation_free(
         &self,
         harness: Harness,
         id: &str,
-        own: Option<&str>,
+        own: Option<&Record>,
     ) -> Result<(), SessionError> {
         let records = crate::session::read_records(&self.paths.sessions())?;
         if let Some(other) = records.iter().find(|record| {
-            Some(record.id.as_str()) != own
+            Some(record.id.as_str()) != own.map(|own| own.id.as_str())
                 && matches!(record.state, State::Running | State::Held)
                 && record
                     .conversation
@@ -806,7 +808,23 @@ impl Host {
                 other.id
             )));
         }
-        if crate::discover::harness_runs(harness.program(), id) {
+        // Process ids from another boot name other processes now.
+        let boot = crate::service::boot_id();
+        let own = own
+            .filter(|record| match (&record.boot_id, &boot) {
+                (Some(then), Some(now)) => then == now,
+                _ => true,
+            })
+            .map(|record| crate::discover::Own {
+                roots: record
+                    .wrapper_pid
+                    .into_iter()
+                    .chain(record.harness_pid)
+                    .collect(),
+                pgid: record.pgid,
+            })
+            .unwrap_or_default();
+        if crate::discover::harness_runs(harness.program(), id, &own) {
             return Err(SessionError::failed(format!(
                 "another process already runs conversation {id}"
             )));
